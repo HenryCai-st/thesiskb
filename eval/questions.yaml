@@ -5,7 +5,8 @@
 # path:   which router path should answer it (Milestone 6); lists mean multi-path.
 # expected_facts: short facts a correct answer must contain (checked by an LLM judge).
 # expected_tasks: for task questions, rows the extraction must produce (recall is measured on these).
-# TODO(user): fill expected_facts for the video/audio once you have re-watched them.
+# Video/audio facts were taken from the YouTube subtitles in data/reference/ (checked by the user
+# against the video). data/reference/ is for grading only and is never ingested.
 
 fixtures:
   survey: 2209.00796v15.pdf                      # Yang et al., "Diffusion Models: A Comprehensive Survey..." (59 p.)
@@ -36,14 +37,28 @@ questions:
 
   # --- Cross-modal comparison (video + audio) ---
   - id: cmp-01
-    question: What is the difference between Nano and DGX Spark?
+    question: What is the difference between Jetson Orin Nano Super and DGX Spark?
     type: comparison
     path: [general]
     expected_sources: [jetson_video, dgx_audio]
-    expected_facts: []   # TODO(user): e.g. target use, compute, memory, price as stated in the recordings
+    expected_facts:
+      - Orin Nano Super - almost 70 trillion operations per second, 25 W, $249
+      - Orin Nano Super - aimed at robotics / edge; runs CUDA, LLMs, agentic AI
+      - DGX Spark - a personal supercomputer on your desk for developers, researchers, students
+      - DGX Spark - runs large state-of-the-art open models locally without data-center GPUs
+      - The KB gives no price or specs for DGX Spark; the answer must say so instead of guessing
+    notes: Citations must carry timestamps from both recordings.
+
+  - id: cmp-02
+    question: What is the difference between Jetson Nano and DGX Spark?
+    type: comparison
+    path: [general]
+    expected_sources: [jetson_video, dgx_audio]
+    expected_facts: same_as:cmp-01
     notes: >
-      The video is about the Jetson *Orin Nano Super*, not the original Jetson Nano.
-      Citations must carry timestamps from both recordings.
+      Robustness variant with the loose name the speaker himself uses ("Jetson Nano super").
+      The answer should resolve "Jetson Nano" to the Orin Nano Super in the video and may note
+      the naming difference; it must not bring in original Jetson Nano specs from model memory.
 
   # --- Task / schedule (Q3 type: SQL over extracted tasks, not free generation) ---
   - id: task-01
@@ -74,7 +89,23 @@ questions:
     type: general
     path: [general]
     expected_sources: [dgx_audio]
-    expected_facts: []   # TODO(user): target users as described in the audio
+    expected_facts:
+      - Developers who want to run the biggest models but are limited by their hardware
+      - Researchers, artists and innovators; AI labs at universities (ASU, NYU)
+      - Graduate students in AI ("should have one on their desk")
+      - Robotics / edge-AI teams that simulate and fine-tune models for edge devices (e.g. Zipline)
+    notes: Answer should quote the audio with timestamps.
+
+  # --- Person-centric (Q2 type) ---
+  - id: person-01
+    question: Who is Will.i.am and what does he say about DGX Spark?
+    type: person
+    path: person
+    expected_sources: [dgx_audio]
+    expected_facts:
+      - Introduces himself as a musician, creator, producer, technocrat, futurist
+      - He now has a Spark and can take it with him everywhere he goes
     notes: >
-      Not a Q2 "person" question (that is about what a specific named person says/prefers).
-      Answer should quote the audio with timestamps.
+      Tests speaker resolution: the audio has several unnamed speakers, and only the
+      self-introduction ties one diarization label to "Will.i.am". Quotes from other speakers
+      must not be attributed to him. Needs Milestone 4 (diarization) + speaker labelling.
