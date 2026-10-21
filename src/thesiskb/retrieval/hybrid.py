@@ -17,6 +17,7 @@ class SearchFilters(BaseModel):
     source_types: list[str] | None = None  # e.g. ["paper", "book"]
     verified_only: bool = False
     source_ids: list[uuid.UUID] | None = None
+    chunk_ids: list[uuid.UUID] | None = None  # e.g. chunks where a given person speaks
 
 
 class Hit(BaseModel):
@@ -55,12 +56,15 @@ def _where(filters: SearchFilters) -> tuple[str, dict[str, Any]]:
     if filters.source_ids:
         clauses.append("c.source_id IN :source_ids")
         params["source_ids"] = filters.source_ids
+    if filters.chunk_ids:
+        clauses.append("c.id IN :chunk_ids")
+        params["chunk_ids"] = filters.chunk_ids
     return (" AND " + " AND ".join(clauses)) if clauses else "", params
 
 
 def _expanding(sql: str, params: dict[str, Any]):
     stmt = text(sql)
-    for key in ("source_types", "source_ids"):
+    for key in ("source_types", "source_ids", "chunk_ids"):
         if key in params:
             stmt = stmt.bindparams(bindparam(key, expanding=True))
     return stmt

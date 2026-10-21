@@ -1,0 +1,349 @@
+"""Answer paths as context providers + one orchestrator (`answer`).
+
+Each path returns citable passages; the orchestrator routes the question, collects passages
+from every chosen path, numbers them [S1].. and runs one grounded generation plus the usual
+citation/support checks. Multi-path questions therefore need no special handling.
+
+  general     hybrid search + rerank over all sources
+  literature  papers/books: LLM sub-queries → hybrid search each → rerank on the question →
+              per-chunk evidence summary with a relevance score (PaperQA2-style) → keep the best
+  person      statements extracted for the person + chunks where they speak or that they
+              authored, searched with the question
+  task        open tasks from SQL, sorted by due date
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+import uuid
+from collections.abc import Callable
+
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session
+
+from thesiskb.answer.generate import REFUSAL, Answer, Citation, generate_from, hit_citations
+from thesiskb.answer.tasks import TASK_RULES, task_citations
+from thesiskb.core.config import RetrievalConfig, get_pipeline_config
+from thesiskb.core.models import Chunk, Person, Source, Speaker, Statement
+from thesiskb.ingest.extract import quote_in
+from thesiskb.llm.gateway import LLMGateway
+from thesiskb.retrieval.hybrid import Hit, SearchFilters, hybrid_search, rrf_fuse
+from thesiskb.retrieval.rerank import rerank
+from thesiskb.retrieval.router import Route, route_question
+
+log = logging.getLogger(__name__)
+
+MAX_PASSAGES = 12
+
+
+class Ctx(BaseModel):
+    """What a provider hands to the orchestrator."""
+
+    cites: list[Citation] = Field(default_factory=list)
+    rules: str = ""
+    timings: dict[str, float] = Field(default_factory=dict)
+
+
+def _top_hits(session, gateway, query, filters, cfg: RetrievalConfig, k: int | None = None):
+    hits = hybrid_search(session, gateway, query, filters, cfg.hybrid_top_k, cfg.rrf_k)
+    top = rerank(gateway, query, hits, k or cfg.rerank_top_k)
+    return [h for h in top if h.score >= cfg.min_rerank_score]
+
+
+# --- general -------------------------------------------------------------------------------
+
+
+def general_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
+    t0 = time.perf_counter()
+    top = _top_hits(session, gateway, question, filters, cfg)
+    return Ctx(cites=hit_citations(top), timings={"search+rerank": time.perf_counter() - t0})
+
+
+# --- literature ----------------------------------------------------------------------------
+
+SUBQUERY_PROMPT = """Rewrite the research question into {n} short, different search queries for \
+a library of papers (vary the wording and cover the sub-aspects). Return JSON: \
+{{"queries": ["...", "..."]}}
+
+Question: {question}"""
+
+SUMMARY_PROMPT = """Question: {question}
+
+Passage ({header}):
+{text}
+
+Summarise only what this passage says that helps answer the question, in 1-3 sentences, keeping \
+method names, numbers and claims exactly as written. Then rate its relevance 0-10 (0 = nothing \
+relevant). Return JSON: {{"summary": "...", "relevance": 0-10}}"""
+
+LITERATURE_RULES = """- Passages marked "Relevant evidence" are question-focused summaries of a \
+paper chunk; cite them like any passage. Synthesise across papers: group by approach or theme, \
+note agreements and disagreements, and name methods as the papers do."""
+
+
+class _Queries(BaseModel):
+    queries: list[str]
+
+
+class _Summary(BaseModel):
+    summary: str
+    relevance: float = Field(ge=0, le=10)
+
+
+def sub_queries(gateway: LLMGateway, question: str, n: int = 3) -> list[str]:
+    try:
+        raw = gateway.chat(
+            [{"role": "user", "content": SUBQUERY_PROMPT.format(n=n, question=question)}],
+            role="router",
+            response_format=_Queries,
+        )
+        qs = [q.strip() for q in _Queries.model_validate(json.loads(raw)).queries if q.strip()]
+    except (ValidationError, ValueError):
+        qs = []
+    return list(dict.fromkeys([question, *qs[:n]]))
+
+
+def evidence_summary(gateway: LLMGateway, question: str, c: Citation) -> _Summary | None:
+    prompt = SUMMARY_PROMPT.format(
+        question=question, header=c.context_header or c.filename, text=c.text
+    )
+    try:
+        raw = gateway.chat(
+            [{"role": "user", "content": prompt}], role="router", response_format=_Summary
+        )
+        return _Summary.model_validate(json.loads(raw))
+    except (ValidationError, ValueError):
+        return None
+
+
+def literature_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
+    lit = (get_pipeline_config().model_extra or {}).get("literature", {})
+    t0 = time.perf_counter()
+    f = (filters or SearchFilters()).model_copy(update={"source_types": ["paper", "book"]})
+    queries = sub_queries(gateway, question, lit.get("sub_queries", 3))
+    t1 = time.perf_counter()
+    lists = {
+        f"q{i}": hybrid_search(session, gateway, q, f, cfg.hybrid_top_k, cfg.rrf_k)
+        for i, q in enumerate(queries)
+    }
+    hits: list[Hit] = rrf_fuse(lists, k=cfg.rrf_k, limit=cfg.hybrid_top_k)
+    top = [
+        h
+        for h in rerank(gateway, question, hits, lit.get("candidates", 10))
+        if h.score >= cfg.min_rerank_score
+    ]
+    t2 = time.perf_counter()
+    cites = hit_citations(top)
+    if lit.get("evidence_summaries", True):
+        scored = []
+        for c in cites:
+            s = evidence_summary(gateway, question, c)
+            if s is None:
+                scored.append((5.0, c))  # keep, unsummarised
+            elif s.relevance >= lit.get("min_relevance", 3):
+                c.summary = s.summary
+                scored.append((s.relevance, c))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        cites = [c for _, c in scored[: cfg.rerank_top_k]]
+    t3 = time.perf_counter()
+    return Ctx(
+        cites=cites,
+        rules=LITERATURE_RULES,
+        timings={"sub-queries": t1 - t0, "search+rerank": t2 - t1, "summaries": t3 - t2},
+    )
+
+
+# --- person --------------------------------------------------------------------------------
+
+PERSON_RULES = """- The question is about {name}. Attribute to {name} only what the passages \
+show {name} said, wrote or prefers ("Statement by" passages, lines starting "[m:ss] {name}:", or \
+papers {name} authored); other speakers' lines are context, never {name}'s view. Group the \
+answer by topic and give each claim's timestamp or page."""
+
+
+def person_chunk_ids(session: Session, person: Person) -> list[uuid.UUID]:
+    """Chunks where the person speaks (via speaker labels) or that come from papers they wrote."""
+    labels = session.execute(
+        select(Speaker.source_id, Speaker.diarization_label).where(Speaker.person_id == person.id)
+    ).all()
+    ids: list[uuid.UUID] = []
+    for source_id, label in labels:
+        for c in session.scalars(select(Chunk).where(Chunk.source_id == source_id)):
+            if label in (c.locator.get("speakers") or []):
+                ids.append(c.id)
+    names = [person.name, *(person.aliases or [])]
+    authors = func.array_to_string(Source.authors, "|")
+    authored = session.scalars(
+        select(Source.id).where(or_(*[authors.ilike(f"%{n}%") for n in names]))
+    ).all()
+    if authored:
+        ids += session.scalars(select(Chunk.id).where(Chunk.source_id.in_(authored))).all()
+    return list(dict.fromkeys(ids))
+
+
+def statement_citations(session: Session, person: Person, start: int = 1) -> list[Citation]:
+    cites = []
+    rows = session.scalars(select(Statement).where(Statement.person_id == person.id)).all()
+    for st in rows:
+        chunk = session.get(Chunk, st.source_chunk_id) if st.source_chunk_id else None
+        src = session.get(Source, st.source_id)
+        if chunk is None or src is None:
+            continue
+        # the transcript line holding the quote (keeps its "[m:ss] Name:" for pinpointing)
+        line = next(
+            (ln for ln in chunk.text.splitlines() if quote_in(st.evidence_quote, ln)),
+            f'"{st.evidence_quote}"',
+        )
+        cites.append(
+            Citation(
+                n=start + len(cites),
+                chunk_id=chunk.id,
+                filename=src.path.rsplit("/", 1)[-1],
+                title=src.title,
+                context_header=chunk.context_header,
+                locator=chunk.locator,
+                verification_status=src.verification_status,
+                text=f"Statement by {person.name} on {st.topic}: {st.stance}\n{line}",
+                kind="statement",
+            )
+        )
+    return cites
+
+
+def person_ctx(session, gateway, question, cfg, filters, route: Route) -> Ctx:
+    t0 = time.perf_counter()
+    person = session.get(Person, uuid.UUID(route.person_id)) if route.person_id else None
+    if person is None:
+        return Ctx()
+    ids = person_chunk_ids(session, person)
+    hits = []
+    if ids:
+        f = (filters or SearchFilters()).model_copy(update={"chunk_ids": ids})
+        hits = _top_hits(session, gateway, question, f, cfg, k=6)
+    # statements first (they carry the attribution), then the person's chunks for context
+    cites = statement_citations(session, person) + hit_citations(hits)
+    return Ctx(
+        cites=cites,
+        rules=PERSON_RULES.format(name=person.name),
+        timings={"person": time.perf_counter() - t0},
+    )
+
+
+# --- entity (graph-lite) -------------------------------------------------------------------
+
+ENTITY_RULES = """- "Entities:" passages list things the knowledge base extracted from that \
+passage, with relation facts. Group the answer by entity, merge name variants of the same thing \
+(e.g. "Jetson Nano Super" and "Jetson Orin Nano"), and cite the passage for each claim."""
+
+
+def entity_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
+    from thesiskb.retrieval.graph import entity_evidence
+
+    t0 = time.perf_counter()
+    cites = []
+    for ev in entity_evidence(session, question):
+        chunk = session.get(Chunk, ev.chunk_id)
+        src = session.get(Source, chunk.source_id) if chunk else None
+        if chunk is None or src is None:
+            continue
+        listing = "\n".join(
+            f"- {e.name} ({e.type})" + (": " + "; ".join(e.facts) if e.facts else "")
+            for e in ev.entities
+        )
+        cites.append(
+            Citation(
+                n=len(cites) + 1,
+                chunk_id=chunk.id,
+                filename=src.path.rsplit("/", 1)[-1],
+                title=src.title,
+                context_header=chunk.context_header,
+                locator=chunk.locator,
+                verification_status=src.verification_status,
+                text=f"Entities:\n{listing}\n\n{chunk.text}",
+                kind="entity",
+            )
+        )
+    return Ctx(cites=cites, rules=ENTITY_RULES, timings={"graph": time.perf_counter() - t0})
+
+
+# --- task ----------------------------------------------------------------------------------
+
+
+def task_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
+    t0 = time.perf_counter()
+    return Ctx(
+        cites=task_citations(session), rules=TASK_RULES, timings={"sql": time.perf_counter() - t0}
+    )
+
+
+PROVIDERS: dict[str, Callable[..., Ctx]] = {
+    "general": general_ctx,
+    "literature": literature_ctx,
+    "person": person_ctx,
+    "task": task_ctx,
+    "entity": entity_ctx,
+}
+
+
+def merge(ctxs: list[Ctx], limit: int = MAX_PASSAGES) -> list[Citation]:
+    """Renumber passages from all paths [S1].., dropping exact duplicates, path order kept."""
+    seen: set[tuple] = set()
+    out: list[Citation] = []
+    per_path = max(3, limit // max(1, len(ctxs)))
+    for ctx in ctxs:
+        for c in ctx.cites[:per_path]:
+            key = (c.chunk_id, c.kind, c.text[:200])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(c.model_copy(update={"n": len(out) + 1}))
+    return out[:limit]
+
+
+def answer(
+    session: Session,
+    gateway: LLMGateway,
+    question: str,
+    cfg: RetrievalConfig,
+    filters: SearchFilters | None = None,
+    path: str = "auto",
+    verify_support: bool = True,
+) -> Answer:
+    from thesiskb.answer.verify import verify
+
+    t0 = time.perf_counter()
+    if path == "auto":
+        route = route_question(session, gateway, question)
+    else:
+        route = Route(paths=[path], by="forced")
+        if path == "person":
+            forced = route_question(session, None, question, use_llm=False)
+            route.person, route.person_id = forced.person, forced.person_id
+    timings = {"route": time.perf_counter() - t0}
+
+    ctxs = []
+    for p in route.paths:
+        ctx = PROVIDERS[p](session, gateway, question, cfg, filters, route)
+        timings |= {f"{p}:{k}": v for k, v in ctx.timings.items()}
+        ctxs.append(ctx)
+    cites = merge(ctxs)
+    if not cites:
+        return Answer(
+            question=question,
+            text=REFUSAL,
+            text_with_ids=REFUSAL,
+            refused=True,
+            timings=timings,
+            route=route.model_dump(),
+        )
+    t1 = time.perf_counter()
+    rules = "\n".join(c.rules for c in ctxs if c.rules)
+    ans = generate_from(gateway, question, cites, extra_rules=rules)
+    t2 = time.perf_counter()
+    verify(gateway, ans, check_support=verify_support and not ans.refused)
+    ans.timings = timings | {"generate": t2 - t1, "verify": time.perf_counter() - t2}
+    ans.route = route.model_dump()
+    return ans

@@ -128,3 +128,25 @@ questions:
     expected_quotes:
       - {t: 81.8}   # VTT "trillion operations"; Whisper 81.5
     expect_keyframe: true
+
+  # --- Relation questions (Milestone 6: decide whether a graph layer is needed) ---
+  - id: rel-01
+    question: How are diffusion models connected to other generative models such as VAEs, GANs and normalizing flows?
+    type: relation
+    path: literature
+    expected_sources: [survey]
+    expected_facts:
+      - The survey has a section on connections with LLMs, VAEs, GANs, normalizing flows, autoregressive and energy-based models
+    notes: Relations inside one paper; plain retrieval should find section 6.
+
+  - id: rel-02
+    question: Which NVIDIA products appear in my sources, and what is each one for?
+    type: relation
+    path: entity        # was general; failed there (refused) — see ADR 0007
+    expected_sources: [jetson_video, dgx_audio]
+    expected_facts:
+      - Jetson Orin Nano Super - small AI computer for robotics / edge, $249
+      - DGX Spark - personal AI supercomputer on the desk for developers and researchers
+    notes: >
+      Aggregation across sources (entity-centric). The entities/relations tables hold both
+      products; this tests whether retrieval alone gathers them or a graph lookup is needed.

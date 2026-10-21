@@ -48,7 +48,10 @@ class Citation(BaseModel):
     context_header: str | None
     locator: dict[str, Any]
     verification_status: str
-    text: str
+    text: str  # the evidence the support judge checks against
+    kind: str = "chunk"  # chunk | task | statement
+    summary: str | None = None  # literature path: question-focused evidence summary
+    score: float | None = None
 
 
 SentenceStatus = Literal[
@@ -83,6 +86,7 @@ class Answer(BaseModel):
     sentences: list[Sentence] = Field(default_factory=list)
     context: list[Citation] = Field(default_factory=list)  # everything shown to the LLM
     timings: dict[str, float] = Field(default_factory=dict)
+    route: dict[str, Any] | None = None  # paths chosen by the router and why
 
     @property
     def cited(self) -> list[Citation]:
@@ -119,7 +123,8 @@ def format_context(cites: list[Citation]) -> str:
         head = f"[S{c.n}] {c.filename}{', ' + where if where else ''}"
         if c.context_header:
             head += f" | {c.context_header}"
-        parts.append(f"{head}\n{c.text}")
+        body = f"Relevant evidence: {c.summary}" if c.summary else c.text
+        parts.append(f"{head}\n{body}")
     return "\n\n".join(parts)
 
 
@@ -284,7 +289,7 @@ def to_chunk_ids(text: str, cites: list[Citation]) -> str:
     return _CITE.sub(repl, text)
 
 
-def _citations(hits: list[Hit]) -> list[Citation]:
+def hit_citations(hits: list[Hit], start: int = 1) -> list[Citation]:
     return [
         Citation(
             n=i,
@@ -295,16 +300,28 @@ def _citations(hits: list[Hit]) -> list[Citation]:
             locator=h.locator,
             verification_status=h.verification_status,
             text=h.text,
+            score=h.score,
         )
-        for i, h in enumerate(hits, start=1)
+        for i, h in enumerate(hits, start=start)
     ]
 
 
 def generate(gateway: LLMGateway, question: str, hits: list[Hit]) -> Answer:
-    cites = _citations(hits)
+    return generate_from(gateway, question, hit_citations(hits))
+
+
+def generate_from(
+    gateway: LLMGateway,
+    question: str,
+    cites: list[Citation],
+    extra_rules: str = "",
+    system_prompt: str = SYSTEM_PROMPT,
+) -> Answer:
+    """One grounded answer over prepared passages (chunks, task rows, statements...)."""
+    system = system_prompt + (f"\n{extra_rules}" if extra_rules else "")
     user = f"Context:\n\n{format_context(cites)}\n\nQuestion: {question}"
     raw = gateway.chat(
-        [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
         role="answer",
     ).strip()
     refused = REFUSAL.rstrip(".").lower() in raw.lower()

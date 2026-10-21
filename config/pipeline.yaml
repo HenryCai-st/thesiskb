@@ -28,6 +28,13 @@ retrieval:
   rrf_k: 60
   min_rerank_score: 0.02
 
+# Literature path (PaperQA2-style): sub-queries → search → rerank → per-chunk evidence summaries
+literature:
+  sub_queries: 3        # LLM rewrites of the question, searched alongside it
+  candidates: 10        # reranked chunks that get an evidence summary
+  evidence_summaries: true
+  min_relevance: 3      # 0-10; summaries rated lower are dropped
+
 # Born-digital PDFs don't need OCR; turn on for scans.
 pdf_ocr: false
 # Look up title/authors/date for arXiv papers (only the arXiv id is sent).

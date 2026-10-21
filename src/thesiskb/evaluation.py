@@ -12,14 +12,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from thesiskb.answer.generate import answer_question
-from thesiskb.answer.tasks import answer_tasks
+from thesiskb.answer.paths import answer
 from thesiskb.core.config import REPO_ROOT, RetrievalConfig
 from thesiskb.core.models import Chunk, EvalRun, Source, Task
 from thesiskb.llm.gateway import LLMGateway
-from thesiskb.retrieval.hybrid import SearchFilters
 
-PATH_FILTERS = {"literature": ["paper", "book"]}
 TIMESTAMP_TOLERANCE_S = 5.0
 
 
@@ -38,6 +35,8 @@ class QuestionResult(BaseModel):
     type: str
     status: str  # ran | skipped
     reason: str | None = None
+    routed: list[str] = Field(default_factory=list)
+    route_ok: bool | None = None
     retrieval_hit: bool | None = None
     citation_hit: bool | None = None
     refused: bool | None = None
@@ -66,6 +65,7 @@ def run_eval(
     cfg: RetrievalConfig,
     gold_path: Path,
     types: set[str] | None = None,
+    oracle: bool = False,
 ) -> tuple[list[QuestionResult], dict[str, Any]]:
     fixtures, questions = load_gold(gold_path)
     by_name = _source_by_filename(session)
@@ -82,14 +82,17 @@ def run_eval(
             )
             continue
         expected = {by_name[n].id for n in names}
-        paths = [q.path] if isinstance(q.path, str) else q.path
-        source_types = PATH_FILTERS.get(paths[0]) if len(paths) == 1 else None
-        if paths == ["task"]:
-            ans = answer_tasks(session, gateway, q.question)  # Q3: SQL, not free generation
+        gold_paths = [q.path] if isinstance(q.path, str) else list(q.path)
+        if oracle:  # bypass the router: answer with the gold path
+            ans = answer(session, gateway, q.question, cfg, path=gold_paths[0])
         else:
-            ans = answer_question(
-                session, gateway, q.question, cfg, SearchFilters(source_types=source_types)
-            )
+            ans = answer(session, gateway, q.question, cfg, path="auto")
+        routed = (ans.route or {}).get("paths", [])
+        # correct if the gold path is among those the router chose (extra paths cost time, not
+        # correctness); "general" gold is also satisfied by any search path
+        route_ok = all(p in routed for p in gold_paths) or (
+            gold_paths == ["general"] and bool(set(routed) & {"general", "literature"})
+        )
         chunk_source = {c.chunk_id: _chunk_source(session, c.chunk_id) for c in ans.context}
         cited_sources = {chunk_source[c.chunk_id] for c in ans.cited}
         pins = [p for s in ans.sentences for p in s.pinpoints]
@@ -120,6 +123,8 @@ def run_eval(
                 supported=sum(s.status == "supported" for s in ans.sentences),
                 checked=sum(s.status in ("supported", "unsupported") for s in ans.sentences),
                 quote_hit=quote_hit,
+                routed=routed,
+                route_ok=route_ok,
                 keyframe_hit=keyframe_hit,
                 latency_s=round(sum(ans.timings.values()), 1),
                 answer=ans.text,
@@ -155,6 +160,7 @@ def summarize(results: list[QuestionResult]) -> dict[str, Any]:
         "invalid_citations": sum(r.invalid_citations for r in ran),
         "uncited_sentences": sum(r.uncited_sentences for r in ran),
         "support_rate": round(sum(r.supported for r in ran) / checked, 3) if checked else None,
+        "router_accuracy": _rate([r.route_ok for r in ran]),
         "quote_hit_rate": _rate([r.quote_hit for r in ran]),
         "keyframe_hit_rate": _rate([r.keyframe_hit for r in ran]),
         "mean_latency_s": round(sum(r.latency_s or 0 for r in ran) / n, 1),

@@ -140,30 +140,26 @@ def ask(
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip the LLM support check"),
     show_context: bool = typer.Option(False, help="Also print every retrieved passage"),
     as_json: bool = typer.Option(False, "--json", help="Print the full Answer as JSON"),
-    path: str = typer.Option(
-        "search", help="search = hybrid RAG over chunks; task = answer from the tasks table"
-    ),
+    path: str = typer.Option("auto", help="auto (router) | general | literature | person | task"),
 ) -> None:
     """Answer a question from the knowledge base, with citations."""
-    from thesiskb.answer.generate import answer_question, locator_label
-    from thesiskb.answer.tasks import answer_tasks
+    from thesiskb.answer.generate import locator_label
+    from thesiskb.answer.paths import answer
     from thesiskb.core.db import session_scope
     from thesiskb.llm import get_gateway
     from thesiskb.retrieval.hybrid import SearchFilters
 
     filters = SearchFilters(source_types=source_type or None, verified_only=verified_only)
     with session_scope() as session:
-        if path == "task":
-            ans = answer_tasks(session, get_gateway(), question, verify_support=not no_verify)
-        else:
-            ans = answer_question(
-                session,
-                get_gateway(),
-                question,
-                get_pipeline_config().retrieval,
-                filters,
-                verify_support=not no_verify,
-            )
+        ans = answer(
+            session,
+            get_gateway(),
+            question,
+            get_pipeline_config().retrieval,
+            filters,
+            path=path,
+            verify_support=not no_verify,
+        )
     if as_json:
         import sys
 
@@ -200,7 +196,13 @@ def ask(
             )
         console.print("[dim]Open a source: tkb open <chunk-id>[/]")
     t = ans.timings
-    console.print(f"\n[dim]{' · '.join(f'{k} {v:.1f}s' for k, v in t.items())}[/]")
+    if ans.route:
+        who = f" ({ans.route['person']})" if ans.route.get("person") else ""
+        console.print(
+            f"\n[dim]route: {' + '.join(ans.route['paths'])}{escape(who)} "
+            f"[{ans.route['by']}: {escape(ans.route.get('reason') or '')}][/]"
+        )
+    console.print(f"[dim]{' · '.join(f'{k} {v:.1f}s' for k, v in t.items())}[/]")
 
 
 speakers_app = typer.Typer(
@@ -432,6 +434,64 @@ def tasks_done(task_id: str) -> None:
 
 
 @app.command()
+def person(name: str = typer.Argument(..., help='Name or alias, e.g. "Will.i.am"')) -> None:
+    """Person profile: statements grouped by topic, recordings they speak in, papers they wrote."""
+    from collections import defaultdict
+
+    from sqlalchemy import func, or_, select
+
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Source, Speaker, Statement
+    from thesiskb.ingest.extract import resolve_person
+
+    with session_scope() as session:
+        p = resolve_person(session, name)
+        if p is None:
+            console.print(
+                f"[red]No person '{escape(name)}'. Label a speaker first: "
+                'tkb speakers label <file> <LABEL> "<name>"[/]'
+            )
+            raise typer.Exit(code=1)
+        console.print(
+            f"[bold]{escape(p.name)}[/]"
+            + (f" ({escape(p.role)})" if p.role else "")
+            + (f"  aliases: {escape(', '.join(p.aliases))}" if p.aliases else "")
+        )
+
+        recordings = session.execute(
+            select(Source.path, Speaker.diarization_label)
+            .join(Speaker, Speaker.source_id == Source.id)
+            .where(Speaker.person_id == p.id)
+        ).all()
+        if recordings:
+            console.print("\n[bold]Speaks in[/]")
+            for path, label in recordings:
+                console.print(f"  {escape(path.rsplit('/', 1)[-1])} ({label})")
+
+        authors = func.array_to_string(Source.authors, "|")
+        names = [p.name, *(p.aliases or [])]
+        papers = session.scalars(
+            select(Source).where(or_(*[authors.ilike(f"%{n}%") for n in names]))
+        ).all()
+        if papers:
+            console.print("\n[bold]Authored[/]")
+            for s in papers:
+                year = f" ({s.published.year})" if s.published else ""
+                console.print(f"  {escape(s.title or s.path)}{year}")
+
+        by_topic = defaultdict(list)
+        for st in session.scalars(select(Statement).where(Statement.person_id == p.id)):
+            by_topic[st.topic].append(st)
+        if by_topic:
+            console.print("\n[bold]Statements by topic[/]")
+            for topic, sts in sorted(by_topic.items()):
+                console.print(f"  [bold]{escape(topic)}[/]")
+                for st in sts:
+                    console.print(f'    {escape(st.stance)}  [dim]"{escape(st.evidence_quote)}"[/]')
+        console.print(f'\n[dim]Ask: tkb ask "What does {escape(p.name)} think about …?"[/]')
+
+
+@app.command()
 def statements(
     person: str | None = typer.Option(None, help="Name, alias or speaker label (e.g. SPEAKER_02)"),
 ) -> None:
@@ -558,6 +618,7 @@ def sources() -> None:
 def eval_cmd(
     gold: Path = typer.Option(REPO_ROOT / "eval" / "questions.yaml", help="Gold questions file"),
     question_type: list[str] | None = typer.Option(None, "--type", help="Only these types"),
+    oracle: bool = typer.Option(False, help="Use each question's gold path instead of the router"),
 ) -> None:
     """Run the gold questions and report retrieval/citation metrics (stored in eval_runs)."""
     from thesiskb.core.db import session_scope
@@ -571,6 +632,7 @@ def eval_cmd(
             get_pipeline_config().retrieval,
             gold,
             set(question_type) if question_type else None,
+            oracle=oracle,
         )
         prev = previous_summary(session)
 
@@ -578,7 +640,7 @@ def eval_cmd(
     cols = (
         "id",
         "type",
-        "status",
+        "route",
         "retrieved",
         "cited",
         "refused",
@@ -599,7 +661,9 @@ def eval_cmd(
         table.add_row(
             r.id,
             r.type,
-            r.status if r.status == "ran" else f"[dim]{r.reason}[/]",
+            ("+".join(r.routed) + ("" if r.route_ok else " [red]✗[/]"))
+            if r.status == "ran"
+            else f"[dim]{r.reason}[/]",
             yn[r.retrieval_hit],
             yn[r.citation_hit],
             yn[r.refused],
