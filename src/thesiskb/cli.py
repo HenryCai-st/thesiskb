@@ -561,6 +561,21 @@ def verify(
     console.print(f"{escape(name)}: {status}" + (f" by {escape(by)}" if by else ""))
 
 
+@app.command()
+def consent(
+    source: str = typer.Argument(..., help="sha256 prefix or part of filename"),
+    note: str = typer.Argument(..., help='e.g. "verbal consent of all 3 participants, 2026-11-04"'),
+) -> None:
+    """Record how consent was given for a recording of people (BUILD_GUIDE §10)."""
+    from thesiskb.core.db import session_scope
+
+    with session_scope() as session:
+        src = _resolve_source(session, source)
+        src.consent_note = note
+        name = src.path.rsplit("/", 1)[-1]
+    console.print(f"{escape(name)}: consent noted")
+
+
 @app.command("local-only")
 def local_only_cmd(
     source: str = typer.Argument(..., help="sha256 prefix or part of filename"),

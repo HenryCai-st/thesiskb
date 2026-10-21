@@ -71,9 +71,10 @@ class SingleSpeaker:
     machines, or when the gated pyannote model is not available (no Hugging Face token)."""
 
     def diarize(self, wav: Path, out_json: Path) -> list[dict[str, Any]]:
-        from thesiskb.ingest.audio import SAMPLE_RATE, load_wav
+        import wave
 
-        duration = len(load_wav(wav)) / SAMPLE_RATE
+        with wave.open(str(wav)) as w:  # header only: no numpy needed on CPU-only installs
+            duration = w.getnframes() / w.getframerate()
         turns = [{"start": 0.0, "end": round(duration, 2), "speaker": "SPEAKER_00"}]
         out_json.write_text(json.dumps(turns), encoding="utf-8")
         return turns

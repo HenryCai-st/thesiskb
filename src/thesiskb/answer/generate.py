@@ -275,6 +275,8 @@ def pinpoint(sentence: Sentence, cites: list[Citation], min_overlap: float = 0.2
                 )
         if best is None or best_score < min_overlap:
             continue
+        if any(p.t == best.t and p.speaker == best.speaker for p in sentence.pinpoints):
+            continue  # two cited passages pointing at the same transcript line
         frames = c.locator.get("frames") or []
         if frames:
             near = min(frames, key=lambda f: abs(f["t"] - best.t))
