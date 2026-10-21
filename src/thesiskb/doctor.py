@@ -112,9 +112,7 @@ def check_ollama(base_url: str, models: ModelsConfig) -> CheckResult:
         )
     pulled = {m["name"] for m in tags.get("models", [])}
     pulled |= {n.removesuffix(":latest") for n in pulled}
-    wanted = {
-        r.model.split("/", 1)[1] for r in models.roles.values() if r.provider.startswith("ollama")
-    }
+    wanted = {r.model_name for r in models.roles.values() if r.served_by_ollama}
     missing = sorted(w for w in wanted if w not in pulled)
     if missing:
         return CheckResult(
@@ -140,15 +138,19 @@ def check_binary(name: str, version_args: list[str], required: bool = True) -> C
     return CheckResult(name=name, status=Status.OK, detail=first)
 
 
-def check_tesseract(languages: list[str]) -> CheckResult:
-    """Tesseract is first needed in Milestone 3, so missing is a warning, not a failure."""
-    path = shutil.which("tesseract")
+def check_tesseract(
+    languages: list[str], cmd: str = "tesseract", tessdata: str | None = None
+) -> CheckResult:
+    """OCR for images. Missing is a warning: the VLM still reads images without it."""
+    path = shutil.which(cmd)
     if not path:
         return CheckResult(
-            name="tesseract", status=Status.WARN, detail="not found (needed from Milestone 3)"
+            name="tesseract",
+            status=Status.WARN,
+            detail=f"not found ({cmd}); set TKB_TESSERACT_CMD in .env",
         )
     try:
-        out = _run([path, "--list-langs"])
+        out = _run([path, *(["--tessdata-dir", tessdata] if tessdata else []), "--list-langs"])
     except subprocess.SubprocessError as e:
         return CheckResult(name="tesseract", status=Status.WARN, detail=f"failed: {e}")
     installed = {line.strip() for line in out.splitlines()[1:]}  # line 0 is a header
@@ -172,5 +174,5 @@ def run_checks(
         check_gpu(),
         check_ollama(settings.ollama_base_url, models),
         check_binary("ffmpeg", ["-version"]),
-        check_tesseract(ocr_languages),
+        check_tesseract(ocr_languages, settings.tesseract_cmd, settings.tessdata_dir),
     ]

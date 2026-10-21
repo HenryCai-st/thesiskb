@@ -89,18 +89,18 @@ def test_ingest_is_idempotent_and_searchable(setup):
     FakeConverter.calls = 0
     files = detect([pdf])
 
-    first = pipeline.ingest_documents(session, files, cfg, FakeGateway(), metadata_lookup=False)
+    first = pipeline.ingest(session, files, cfg, FakeGateway(), metadata_lookup=False)
     assert (first["parse"], first["chunk"], first["embed"]) == (1, 1, 1)
     assert first["failed"] == []
 
-    second = pipeline.ingest_documents(session, files, cfg, FakeGateway(), metadata_lookup=False)
+    second = pipeline.ingest(session, files, cfg, FakeGateway(), metadata_lookup=False)
     assert (second["parse"], second["chunk"], second["embed"]) == (0, 0, 0)
     assert FakeConverter.calls == 1
 
     # DB lost (e.g. reset) but stage output on disk: parse is not redone
     session.execute(delete(Source).where(Source.sha256 == files[0].sha256))
     session.commit()
-    third = pipeline.ingest_documents(session, files, cfg, FakeGateway(), metadata_lookup=False)
+    third = pipeline.ingest(session, files, cfg, FakeGateway(), metadata_lookup=False)
     assert FakeConverter.calls == 1
     assert (third["chunk"], third["embed"]) == (1, 1)
 
@@ -119,14 +119,12 @@ def test_ingest_is_idempotent_and_searchable(setup):
 
 def test_moved_file_updates_path_without_rework(setup, tmp_path):
     session, cfg, pdf = setup
-    pipeline.ingest_documents(session, detect([pdf]), cfg, FakeGateway(), metadata_lookup=False)
+    pipeline.ingest(session, detect([pdf]), cfg, FakeGateway(), metadata_lookup=False)
     moved = pdf.with_name("fake paper.pdf").parent / "sub"
     moved.mkdir()
     new_path = moved / "fake paper.pdf"
     pdf.rename(new_path)
-    report = pipeline.ingest_documents(
-        session, detect([new_path]), cfg, FakeGateway(), metadata_lookup=False
-    )
+    report = pipeline.ingest(session, detect([new_path]), cfg, FakeGateway(), metadata_lookup=False)
     assert (report["parse"], report["chunk"], report["embed"]) == (0, 0, 0)
     src = session.scalar(select(Source).where(Source.path.like("%sub/fake paper.pdf")))
     assert src is not None

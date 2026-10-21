@@ -4,15 +4,18 @@ A private, multimodal knowledge base with verified, cited retrieval — papers, 
 whiteboards, meeting recordings and interview videos, all searchable with answers that cite the
 exact page, image or timestamp.
 
-> Status: **Milestone 2 (documents end-to-end)**. PDFs are parsed, chunked, indexed and
-> answerable with page citations; images, audio and video follow in Milestones 3–4.
+> Status: **Milestone 3 (images)**. PDFs and photos (handwriting, whiteboards, post-its) are
+> indexed and answerable with page or image citations; audio and video follow in Milestone 4.
 > See [BUILD_GUIDE.md](BUILD_GUIDE.md) for the full plan and [AGENTS.md](AGENTS.md) for rules
 > coding agents follow.
 
 ## Quickstart (Windows prototype)
 
 Prerequisites: Docker Desktop, [Ollama](https://ollama.com), ffmpeg,
-[uv](https://docs.astral.sh/uv/), an NVIDIA GPU (16 GB VRAM recommended).
+[Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) with `deu` + `eng` language packs,
+[uv](https://docs.astral.sh/uv/), an NVIDIA GPU (16 GB VRAM recommended). On Windows Tesseract is
+not added to PATH: set `TKB_TESSERACT_CMD` (and `TKB_TESSDATA_DIR` if the language packs are in
+a user folder) in `.env`.
 
 ```bash
 uv sync --extra local        # create .venv incl. Docling, CUDA torch, reranker (~6 GB)
@@ -21,6 +24,7 @@ docker compose up -d         # Postgres + pgvector
 uv run tkb db upgrade        # create the schema
 ollama pull qwen3:14b        # answer/extraction model
 ollama pull bge-m3           # embeddings
+ollama pull qwen2.5vl:7b     # vision (photos, handwriting)
 uv run tkb doctor            # check everything
 ```
 
@@ -31,7 +35,12 @@ uv run tkb ingest data/raw               # idempotent: re-running skips finished
 uv run tkb sources                       # index: original filename ↔ sha256, title, stages
 uv run tkb ask "How is diffusion model developing?" --type paper
 uv run tkb eval                          # gold questions in eval/questions.yaml
+uv run tkb open <chunk-id>               # open a cited file (photos open upright)
 ```
+
+Photos are turned upright automatically (the rotation the vision model reads most
+confidently), transcribed by the vision model, and also OCR'd with Tesseract; both readings are
+kept in `data/processed/<sha256>/image.json`. See [ADR 0004](docs/adr/0004-image-reading.md).
 
 Original files are never renamed or copied. Each file is identified by the SHA-256 of its
 content; stage outputs live in `data/processed/<sha256>/`, and moving or renaming a file only
@@ -60,7 +69,8 @@ config/            models.yaml, pipeline.yaml, people.yaml
 src/thesiskb/
   core/            settings, YAML config, DB engine, ORM models
   llm/             LiteLLM gateway: chat(), embed(), rerank(); Ollama VRAM housekeeping
-  ingest/          detect (hash/dedupe), documents (Docling), chunking, metadata, pipeline
+  ingest/          detect (hash/dedupe), documents (Docling), images (VLM + OCR),
+                   chunking, metadata, pipeline
   retrieval/       hybrid search (pgvector + FTS, RRF), cross-encoder rerank
   answer/          cited answer generation, citation + support verification
   evaluation.py    `tkb eval`

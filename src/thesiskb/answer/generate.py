@@ -32,7 +32,7 @@ Rules:
 Numbers like [377] inside the passages are the source's own references; do not copy them.
 - Never use outside knowledge. If the passages do not answer the question, reply exactly: "{REFUSAL}"
 - If the passages answer only part of the question, answer that part and say what is missing.
-- Be concise: a short paragraph or a few bullet points.
+- Be concise: a short paragraph or a few bullet points. List dated items in chronological order.
 - Answer in the language of the question.
 - Your answer covers only the documents in this knowledge base; when asked about the "state of \
 the art" or trends, say it reflects these documents, not the whole field."""
@@ -82,6 +82,13 @@ def locator_label(loc: dict[str, Any]) -> str:
         return f"p. {p}" if not e or e == p else f"pp. {p}–{e}"
     if loc.get("t_start") is not None:
         return f"{_ts(loc['t_start'])}–{_ts(loc.get('t_end') or loc['t_start'])}"
+    if loc.get("image"):
+        parts = ["image"]
+        if loc.get("regions"):
+            parts.append(f"{len(loc['regions'])} region(s)")
+        if loc.get("rotation"):
+            parts.append(f"shown rotated {loc['rotation']}°")
+        return ", ".join(parts)
     return ""
 
 
@@ -93,7 +100,8 @@ def _ts(seconds: float) -> str:
 def format_context(cites: list[Citation]) -> str:
     parts = []
     for c in cites:
-        where = locator_label(c.locator)
+        # display hints (e.g. image rotation) are for the user, not facts for the LLM
+        where = "image" if c.locator.get("image") else locator_label(c.locator)
         head = f"[S{c.n}] {c.filename}{', ' + where if where else ''}"
         if c.context_header:
             head += f" | {c.context_header}"
@@ -123,7 +131,28 @@ def split_answer(text: str) -> list[Sentence]:
             sentences[-1] = _sentence(f"{sentences[-1].text} {piece}")
             continue
         sentences.append(_sentence(piece))
+    _inherit_list_citations(sentences)
     return sentences
+
+
+_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def _inherit_list_citations(sentences: list[Sentence]) -> None:
+    """Uncited bullets under a cited lead-in ending in ':' inherit its citations.
+
+    "Here is the schedule [S1]:" followed by "- Nov: start thesis" is a normal way to write a
+    list; each bullet is still support-checked against the inherited passages.
+    """
+    lead: Sentence | None = None
+    for s in sentences:
+        if _BULLET.match(s.text):
+            if not s.citations and lead is not None:
+                s.citations = list(lead.citations)
+                s.note = "citation from list lead-in"
+        else:
+            ends_colon = _CITE.sub("", s.text).rstrip().endswith(":")
+            lead = s if ends_colon and s.citations else None
 
 
 def _labels(group: str) -> list[int]:

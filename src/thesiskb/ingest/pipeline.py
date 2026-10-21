@@ -1,9 +1,12 @@
 """Stage runner for ingestion. Idempotent: each (source, stage) has one row in `jobs`.
 
-Stages for documents (Milestone 2), run as batches so only one GPU model family is loaded:
-  parse  Docling → data/processed/<sha>/docling.json      (GPU; Ollama models unloaded first)
-  chunk  docling.json → segments + chunks rows, blocks.json (CPU)
-  embed  bge-m3 embeddings + tsvector for chunks           (Ollama embedding model)
+Stages, run as batches so only one heavy GPU model is loaded at a time:
+  parse  documents: Docling → data/processed/<sha>/docling.json   (GPU, Ollama unloaded first)
+         images:    VLM + OCR → data/processed/<sha>/image.json   (Ollama vision model only)
+  chunk  stage output → segments + chunks rows                     (CPU)
+  embed  bge-m3 embeddings + tsvector for chunks                   (Ollama embedding model)
+
+A parse output already on disk counts as done, so re-ingesting after a DB reset needs no GPU.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from thesiskb.core.config import PipelineConfig, get_settings
 from thesiskb.core.models import Chunk, Job, Segment, Source
-from thesiskb.ingest.chunking import chunk_blocks, get_token_counter
+from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
 from thesiskb.ingest.documents import FTS_CONFIG, detect_language, extract_blocks
 from thesiskb.ingest.metadata import arxiv_id_from_name, lookup_arxiv
@@ -28,12 +31,18 @@ from thesiskb.llm.gateway import LLMGateway
 
 log = logging.getLogger(__name__)
 
-DOC_STAGES = ("parse", "chunk", "embed")
+STAGES = ("parse", "chunk", "embed")
+SUPPORTED_MODALITIES = DOCUMENT_MODALITIES | {"image"}
+PARSE_OUTPUT = {"image": "image.json"}  # everything else: docling.json
 EMBED_BATCH = 16
 
 
 def processed_dir(cfg: PipelineConfig, sha256: str) -> Path:
     return Path(cfg.processed_dir) / sha256
+
+
+def parse_output(cfg: PipelineConfig, src: Source) -> Path:
+    return processed_dir(cfg, src.sha256) / PARSE_OUTPUT.get(src.modality, "docling.json")
 
 
 def job_done(session: Session, source: Source, stage: str) -> bool:
@@ -76,7 +85,7 @@ class IngestReport(dict):
     """stage → number of sources where work was actually done; 'failed' → [(file, error)]."""
 
 
-def ingest_documents(
+def ingest(
     session: Session,
     files: list[DetectedFile],
     cfg: PipelineConfig,
@@ -85,48 +94,37 @@ def ingest_documents(
     force: bool = False,
     metadata_lookup: bool = True,
 ) -> IngestReport:
-    report = IngestReport({s: 0 for s in DOC_STAGES})
+    report = IngestReport({s: 0 for s in STAGES})
     report["failed"] = []
-    sources = []
-    for f in files:
-        if f.modality not in DOCUMENT_MODALITIES:
-            continue
-        sources.append((register(session, f, source_type), f))
+    sources = [
+        (register(session, f, source_type), f) for f in files if f.modality in SUPPORTED_MODALITIES
+    ]
     session.commit()
 
-    # --- parse (GPU batch) ---
-    todo = []
+    # --- parse: one GPU batch per modality ---
+    todo: dict[str, list[tuple[Source, DetectedFile]]] = {"document": [], "image": []}
     for s, f in sources:
         if force:
-            todo.append((s, f))
+            pass
         elif job_done(session, s, "parse"):
             continue
-        elif (processed_dir(cfg, s.sha256) / "docling.json").exists():
+        elif parse_output(cfg, s).exists():
             run_stage(session, s, "parse", lambda: None)  # output cached on disk; no GPU work
-        else:
-            todo.append((s, f))
-    if todo:
-        from thesiskb.ingest.documents import DoclingConverter
-        from thesiskb.llm.ollama import unload_all
+            continue
+        todo["image" if s.modality == "image" else "document"].append((s, f))
 
-        unload_all(get_settings().ollama_base_url)
-        converter = DoclingConverter(do_ocr=bool((cfg.model_extra or {}).get("pdf_ocr", False)))
-        try:
-            for src, f in todo:
-                out = processed_dir(cfg, src.sha256) / "docling.json"
-                log.info("parse %s", f.path.name)
-                work = partial(converter.convert, f.path, out)
-                if _safe(report, session, src, f, "parse", work, force=True):
-                    report["parse"] += 1
-        finally:
-            converter.close()
+    if todo["document"]:
+        _parse_documents(session, todo["document"], cfg, report)
+    if todo["image"]:
+        _parse_images(session, todo["image"], cfg, gateway, report)
 
     # --- chunk (CPU) ---
     count = get_token_counter()
     for src, f in sources:
         if not job_done(session, src, "parse"):
             continue
-        work = partial(_chunk_document, session, src, f, cfg, count, metadata_lookup)
+        chunker = _chunk_image if src.modality == "image" else _chunk_document
+        work = partial(chunker, session, src, f, cfg, count, metadata_lookup)
         if _safe(report, session, src, f, "chunk", work, force):
             report["chunk"] += 1
             # new chunks invalidate old embeddings
@@ -143,13 +141,54 @@ def ingest_documents(
     return report
 
 
+def _parse_documents(session, todo, cfg: PipelineConfig, report: IngestReport) -> None:
+    from thesiskb.ingest.documents import DoclingConverter
+    from thesiskb.llm.ollama import unload_all
+
+    unload_all(get_settings().ollama_base_url)
+    converter = DoclingConverter(do_ocr=bool((cfg.model_extra or {}).get("pdf_ocr", False)))
+    try:
+        for src, f in todo:
+            log.info("parse %s", f.path.name)
+            work = partial(converter.convert, f.path, parse_output(cfg, src))
+            if _safe(report, session, src, f, "parse", work, force=True):
+                report["parse"] += 1
+    finally:
+        converter.close()
+
+
+def _parse_images(session, todo, cfg, gateway: LLMGateway, report: IngestReport) -> None:
+    from thesiskb.ingest.images import read_image
+    from thesiskb.llm.ollama import unload_all
+
+    settings = get_settings()
+    unload_all(settings.ollama_base_url)  # free VRAM for the vision model
+    langs = (cfg.model_extra or {}).get("ocr", {}).get("languages", ["eng"])
+    try:
+        for src, f in todo:
+            log.info("read image %s", f.path.name)
+            work = partial(
+                read_image,
+                gateway,
+                f.path,
+                processed_dir(cfg, src.sha256),
+                langs,
+                settings.tesseract_cmd,
+                settings.tessdata_dir,
+            )
+            if _safe(report, session, src, f, "parse", work, force=True):
+                report["parse"] += 1
+    finally:
+        unload_all(settings.ollama_base_url)  # don't leave the VLM next to the answer LLM
+
+
 def _safe(
     report: IngestReport,
     session: Session,
     src: Source,
     f: DetectedFile,
     stage: str,
-    fn: Callable[[], None],
+    fn: Callable[[], object],
     force: bool,
 ) -> bool:
     """run_stage, but a failure is recorded (job row + report) instead of aborting the batch."""
@@ -159,6 +198,28 @@ def _safe(
         log.exception("%s failed for %s", stage, f.path.name)
         report["failed"].append((f.path.name, f"{stage}: {type(e).__name__}: {e}"))
         return False
+
+
+def _replace_rows(session: Session, src: Source) -> None:
+    session.execute(delete(Chunk).where(Chunk.source_id == src.id))
+    session.execute(delete(Segment).where(Segment.source_id == src.id))
+
+
+def _add_chunks(
+    session: Session, src: Source, drafts: list[ChunkDraft], fts: str, seg_ids_for
+) -> None:
+    for d in drafts:
+        session.add(
+            Chunk(
+                source_id=src.id,
+                segment_ids=seg_ids_for(d),
+                text=d.text,
+                context_header=d.context_header,
+                fts_config=fts,
+                locator=d.locator,
+            )
+        )
+    src.ingested_at = _now()
 
 
 def _chunk_document(
@@ -185,9 +246,7 @@ def _chunk_document(
     src.language = lang
     src.pipeline_version = cfg.pipeline_version
 
-    session.execute(delete(Chunk).where(Chunk.source_id == src.id))
-    session.execute(delete(Segment).where(Segment.source_id == src.id))
-
+    _replace_rows(session, src)
     page_segments: dict[int, Segment] = {}
     for page, page_text in sorted(parsed.page_texts.items()):
         seg = Segment(
@@ -200,37 +259,54 @@ def _chunk_document(
         page_segments[page] = seg
     session.flush()
 
-    header_title = _short_title(src)
-    drafts = chunk_blocks(parsed.blocks, cfg.chunking, header_title, count)
-    fts = FTS_CONFIG.get(lang, "simple")
-    for d in drafts:
+    def seg_ids(d: ChunkDraft):
         first, last = d.locator.get("page"), d.locator.get("page_end")
-        seg_ids = [
-            page_segments[p].id
-            for p in range(first or 0, (last or first or 0) + 1)
-            if p in page_segments
-        ]
-        session.add(
-            Chunk(
-                source_id=src.id,
-                segment_ids=seg_ids,
-                text=d.text,
-                context_header=d.context_header,
-                fts_config=fts,
-                locator=d.locator,
-            )
-        )
-    src.ingested_at = _now()
+        pages = range(first or 0, (last or first or 0) + 1)
+        return [page_segments[p].id for p in pages if p in page_segments]
+
+    drafts = chunk_blocks(parsed.blocks, cfg.chunking, _short_title(src), count)
+    _add_chunks(session, src, drafts, FTS_CONFIG.get(lang, "simple"), seg_ids)
     (out_dir / "blocks.json").write_text(
         json.dumps([b.model_dump() for b in parsed.blocks], ensure_ascii=False), encoding="utf-8"
     )
+
+
+def _chunk_image(
+    session: Session,
+    src: Source,
+    f: DetectedFile,
+    cfg: PipelineConfig,
+    count,
+    metadata_lookup: bool,
+) -> None:
+    from thesiskb.ingest.images import ImageReading, image_blocks
+
+    reading = ImageReading.model_validate_json(
+        (processed_dir(cfg, src.sha256) / "image.json").read_text(encoding="utf-8")
+    )
+    blocks = image_blocks(reading, src.path)
+    lang = detect_language(" ".join(b.text for b in blocks))
+    src.language = lang
+    src.pipeline_version = cfg.pipeline_version
+
+    _replace_rows(session, src)
+    segments = [
+        Segment(source_id=src.id, kind="image", text=b.text, locator=b.locator) for b in blocks
+    ]
+    session.add_all(segments)
+    session.flush()
+    all_ids = [s.id for s in segments]
+
+    drafts = chunk_blocks(blocks, cfg.chunking, _short_title(src), count)
+    _add_chunks(session, src, drafts, FTS_CONFIG.get(lang, "simple"), lambda d: all_ids)
 
 
 def _short_title(src: Source) -> str:
     """'Paper: <title> (2022)' style prefix for context headers."""
     kind = (src.source_type or "document").capitalize()
     year = f" ({src.published.year})" if src.published else ""
-    return f"{kind}: {src.title}{year}"
+    title = src.title if src.modality != "image" else src.path.rsplit("/", 1)[-1]
+    return f"{kind}: {title}{year}"
 
 
 def _embed_source(session: Session, src: Source, gateway: LLMGateway) -> None:

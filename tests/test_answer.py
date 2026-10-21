@@ -36,6 +36,15 @@ def test_split_keeps_citations_and_abbreviations():
     assert s[2].status == "structural"
 
 
+def test_bullets_inherit_citation_from_cited_lead_in():
+    s = split_answer("Here is the schedule [S1]:\n- Nov: start\n- Jan: mid-term [S2]\nDone.")
+    assert [x.citations for x in s] == [[1], [1], [2], []]
+    assert s[1].note == "citation from list lead-in"
+    # an uncited lead-in passes nothing on
+    s = split_answer("Schedule:\n- Nov: start")
+    assert s[1].citations == []
+
+
 def test_dangling_citation_joins_previous_sentence():
     s = split_answer("Claim one.\n[S2]")
     assert len(s) == 1 and s[0].citations == [2]

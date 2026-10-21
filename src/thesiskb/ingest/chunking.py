@@ -65,8 +65,16 @@ def merge_locators(locators: list[dict[str, Any]]) -> dict[str, Any]:
 
     Page-based: {"page": first, "page_end": last, "boxes": [{"page", "bbox"}, ...]}
     Time-based: {"t_start": min, "t_end": max}
+    Image-based: {"image": path, "rotation": deg, "regions": [[x0, y0, x1, y1], ...]}
     """
     out: dict[str, Any] = {}
+    images = [loc for loc in locators if loc.get("image")]
+    if images:
+        out["image"] = images[0]["image"]
+        out["rotation"] = images[0].get("rotation", 0)
+        regions = [loc["region"] for loc in images if loc.get("region")]
+        if regions:
+            out["regions"] = regions
     pages = [loc["page"] for loc in locators if loc.get("page") is not None]
     if pages:
         out["page"] = min(pages)

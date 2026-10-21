@@ -32,7 +32,9 @@ class LLMGateway:
             self.ollama_base_url if role.provider.startswith("ollama") else None
         )
         if api_base:
-            kwargs["api_base"] = api_base
+            kwargs["api_base"] = api_base.replace("{ollama_base_url}", self.ollama_base_url)
+        if role.api_key:
+            kwargs["api_key"] = role.api_key
         return kwargs
 
     def chat(
@@ -49,6 +51,23 @@ class LLMGateway:
             kwargs["response_format"] = response_format
         resp = litellm.completion(messages=messages, **kwargs)
         return resp.choices[0].message.content or ""
+
+    def chat_with_logprobs(
+        self, messages: list[Message], role: str = "vision", **params: Any
+    ) -> tuple[str, list[float]]:
+        """Like chat(), plus per-token logprobs (empty if the provider returns none)."""
+        cfg = self.models.role(role)
+        kwargs = self._call_kwargs(cfg) | cfg.params | params | {"logprobs": True}
+        resp = litellm.completion(messages=messages, **kwargs)
+        choice = resp.choices[0]
+        lp = getattr(choice, "logprobs", None)
+        content = getattr(lp, "content", None) if lp is not None else None
+        if content is None and isinstance(lp, dict):
+            content = lp.get("content")
+        logprobs = [
+            float(t["logprob"] if isinstance(t, dict) else t.logprob) for t in content or []
+        ]
+        return choice.message.content or "", logprobs
 
     def embed(self, texts: list[str], role: str = "embedding") -> list[list[float]]:
         if not texts:
@@ -104,6 +123,22 @@ class LLMGateway:
                 kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
             self._cross_encoders[cfg.model] = CrossEncoder(cfg.model, **kwargs)
         return self._cross_encoders[cfg.model]
+
+
+def image_message(prompt: str, jpeg: bytes) -> list[Message]:
+    """One user message with text + an inline JPEG, in OpenAI content-part format."""
+    import base64
+
+    url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": url}},
+            ],
+        }
+    ]
 
 
 @lru_cache

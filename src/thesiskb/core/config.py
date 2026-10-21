@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://thesiskb:thesiskb@localhost:5432/thesiskb"
     ollama_base_url: str = "http://localhost:11434"
     hf_token: str | None = None
+    tesseract_cmd: str = "tesseract"
+    tessdata_dir: str | None = None  # language packs folder if not the install default
     config_dir: Path = REPO_ROOT / "config"
 
 
@@ -31,13 +33,22 @@ class RoleConfig(BaseModel):
 
     model: str
     backend: str = "litellm"
-    api_base: str | None = None
+    api_base: str | None = None  # may contain "{ollama_base_url}"
+    api_key: str | None = None
     vram_gb: float = 0.0
     params: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def provider(self) -> str:
         return self.model.split("/", 1)[0] if "/" in self.model else ""
+
+    @property
+    def model_name(self) -> str:
+        return self.model.split("/", 1)[1] if "/" in self.model else self.model
+
+    @property
+    def served_by_ollama(self) -> bool:
+        return self.provider.startswith("ollama") or "{ollama_base_url}" in (self.api_base or "")
 
 
 class ModelsConfig(BaseModel):

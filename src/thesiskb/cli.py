@@ -83,12 +83,14 @@ def ingest(
     ),
     force: bool = typer.Option(False, help="Redo all stages even if already done"),
 ) -> None:
-    """Ingest documents (Milestone 2: PDF/Office). Other modalities are registered only."""
+    """Ingest documents (PDF/Office) and images. Audio/video follow in Milestone 4."""
     import logging
+    from collections import Counter
 
     from thesiskb.core.db import session_scope
-    from thesiskb.ingest.detect import DOCUMENT_MODALITIES, detect
-    from thesiskb.ingest.pipeline import ingest_documents
+    from thesiskb.ingest.detect import detect
+    from thesiskb.ingest.pipeline import SUPPORTED_MODALITIES
+    from thesiskb.ingest.pipeline import ingest as run_ingest
     from thesiskb.llm import get_gateway
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -96,16 +98,19 @@ def ingest(
         logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = get_pipeline_config()
     files = detect(paths)
-    docs = [f for f in files if f.modality in DOCUMENT_MODALITIES]
-    others = [f for f in files if f.modality not in DOCUMENT_MODALITIES]
-    console.print(f"Found {len(files)} files: {len(docs)} documents, {len(others)} other")
-    for f in others:
-        console.print(f"  [dim]skip (needs a later milestone): {f.path.name} ({f.modality})[/]")
+    supported = [f for f in files if f.modality in SUPPORTED_MODALITIES]
+    by_kind = Counter(f.modality for f in supported)
+    console.print(
+        f"Found {len(files)} files: " + ", ".join(f"{n} {m}" for m, n in sorted(by_kind.items()))
+    )
+    for f in files:
+        if f.modality not in SUPPORTED_MODALITIES:
+            console.print(f"  [dim]skip (needs a later milestone): {f.path.name} ({f.modality})[/]")
 
     with session_scope() as session:
-        report = ingest_documents(
+        report = run_ingest(
             session,
-            docs,
+            supported,
             cfg,
             get_gateway(),
             source_type=source_type,
@@ -176,8 +181,40 @@ def ask(
                 escape(f"  [S{c.n}] {c.filename}, {locator_label(c.locator)}{status}")
                 + f"\n      [dim]{escape(c.context_header or '')}  chunk:{c.chunk_id}[/]"
             )
+        console.print("[dim]Open a source: tkb open <chunk-id>[/]")
     t = ans.timings
     console.print(f"\n[dim]{' · '.join(f'{k} {v:.1f}s' for k, v in t.items())}[/]")
+
+
+@app.command("open")
+def open_chunk(chunk_id: str) -> None:
+    """Open the file a citation points to (images open upright)."""
+    import os
+    import uuid
+
+    from thesiskb.answer.generate import locator_label
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Chunk, Source
+    from thesiskb.ingest.pipeline import processed_dir
+
+    with session_scope() as session:
+        chunk = session.get(Chunk, uuid.UUID(chunk_id))
+        if chunk is None:
+            console.print(f"[red]No chunk {chunk_id}[/]")
+            raise typer.Exit(code=1)
+        src = session.get(Source, chunk.source_id)
+        target = Path(src.path)
+        upright = processed_dir(get_pipeline_config(), src.sha256) / "upright.jpg"
+        if src.modality == "image" and upright.exists():
+            target = upright
+        console.print(f"{escape(src.path)} — {locator_label(chunk.locator)}")
+        console.print(f"[dim]opening {escape(str(target))}[/]")
+    if hasattr(os, "startfile"):
+        os.startfile(target)  # Windows
+    else:
+        import subprocess
+
+        subprocess.run(["xdg-open", str(target)], check=False)
 
 
 @app.command()

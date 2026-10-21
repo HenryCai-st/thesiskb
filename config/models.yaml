@@ -31,8 +31,14 @@ roles:
       temperature: 0.0
 
   vision:
-    model: ollama_chat/qwen2.5vl:7b
+    # Served by Ollama's OpenAI-compatible endpoint: unlike LiteLLM's ollama_chat provider it
+    # returns token logprobs, which ingest/images.py uses to find the upright rotation.
+    model: openai/qwen2.5vl:7b
+    api_base: "{ollama_base_url}/v1"
+    api_key: ollama  # placeholder; Ollama ignores it
     vram_gb: 7
+    params:
+      temperature: 0.0
 
   embedding:
     model: ollama/bge-m3

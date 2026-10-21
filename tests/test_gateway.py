@@ -29,6 +29,23 @@ def test_chat_uses_role_model_and_ollama_base(gateway, monkeypatch):
     assert seen["temperature"] == 0.7  # call param overrides models.yaml
 
 
+def test_vision_role_uses_ollama_openai_endpoint_with_logprobs(gateway, monkeypatch):
+    seen = {}
+
+    def fake_completion(**kwargs):
+        seen.update(kwargs)
+        lp = SimpleNamespace(content=[SimpleNamespace(logprob=-0.1), SimpleNamespace(logprob=-0.3)])
+        msg = SimpleNamespace(content="text")
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, logprobs=lp)])
+
+    monkeypatch.setattr(gw.litellm, "completion", fake_completion)
+    text, lps = gateway.chat_with_logprobs(gw.image_message("read", b"\xff\xd8"), role="vision")
+    assert text == "text" and lps == [-0.1, -0.3]
+    assert seen["api_base"] == "http://ollama:11434/v1"
+    assert seen["logprobs"] is True and seen["api_key"] == "ollama"
+    assert seen["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg")
+
+
 def test_embed_sorts_by_index_and_checks_dim(gateway, monkeypatch):
     def fake_embedding(**kwargs):
         assert kwargs["model"] == "ollama/bge-m3"
