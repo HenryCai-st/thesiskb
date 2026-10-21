@@ -55,7 +55,14 @@ roles:
     max_length: 1024
 
   asr:
-    # Not called through LiteLLM; used by ingest/audio.py (Milestone 4).
+    # Not called through LiteLLM; used by ingest/audio.py.
     backend: faster_whisper
     model: large-v3-turbo
+    compute_type: float16
     vram_gb: 4
+
+  diarization:
+    # pyannote pipeline (gated on Hugging Face: needs TKB_HF_TOKEN and accepted terms).
+    backend: pyannote
+    model: pyannote/speaker-diarization-community-1
+    vram_gb: 1.5

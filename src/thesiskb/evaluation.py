@@ -19,6 +19,7 @@ from thesiskb.llm.gateway import LLMGateway
 from thesiskb.retrieval.hybrid import SearchFilters
 
 PATH_FILTERS = {"literature": ["paper", "book"]}
+TIMESTAMP_TOLERANCE_S = 5.0
 
 
 class GoldQuestion(BaseModel):
@@ -43,6 +44,8 @@ class QuestionResult(BaseModel):
     uncited_sentences: int = 0
     supported: int = 0
     checked: int = 0
+    quote_hit: bool | None = None  # expected_quotes: speaker + timestamp within ±5 s
+    keyframe_hit: bool | None = None  # expect_keyframe: a cited keyframe was shown
     latency_s: float | None = None
     answer: str | None = None
 
@@ -85,6 +88,21 @@ def run_eval(
         )
         chunk_source = {c.chunk_id: _chunk_source(session, c.chunk_id) for c in ans.context}
         cited_sources = {chunk_source[c.chunk_id] for c in ans.cited}
+        pins = [p for s in ans.sentences for p in s.pinpoints]
+        extra = q.model_extra or {}
+        quote_hit = None
+        if extra.get("expected_quotes"):
+            quote_hit = all(
+                any(
+                    abs(p.t - eq["t"]) <= TIMESTAMP_TOLERANCE_S
+                    and (
+                        not eq.get("speaker") or (p.speaker or "").lower() == eq["speaker"].lower()
+                    )
+                    for p in pins
+                )
+                for eq in extra["expected_quotes"]
+            )
+        keyframe_hit = any(p.frame for p in pins) if extra.get("expect_keyframe") else None
         results.append(
             QuestionResult(
                 id=q.id,
@@ -97,6 +115,8 @@ def run_eval(
                 uncited_sentences=sum(s.status == "uncited" for s in ans.sentences),
                 supported=sum(s.status == "supported" for s in ans.sentences),
                 checked=sum(s.status in ("supported", "unsupported") for s in ans.sentences),
+                quote_hit=quote_hit,
+                keyframe_hit=keyframe_hit,
                 latency_s=round(sum(ans.timings.values()), 1),
                 answer=ans.text,
             )
@@ -130,8 +150,15 @@ def summarize(results: list[QuestionResult]) -> dict[str, Any]:
         "invalid_citations": sum(r.invalid_citations for r in ran),
         "uncited_sentences": sum(r.uncited_sentences for r in ran),
         "support_rate": round(sum(r.supported for r in ran) / checked, 3) if checked else None,
+        "quote_hit_rate": _rate([r.quote_hit for r in ran]),
+        "keyframe_hit_rate": _rate([r.keyframe_hit for r in ran]),
         "mean_latency_s": round(sum(r.latency_s or 0 for r in ran) / n, 1),
     }
+
+
+def _rate(values: list[bool | None]) -> float | None:
+    vals = [v for v in values if v is not None]
+    return round(sum(vals) / len(vals), 3) if vals else None
 
 
 def previous_summary(session: Session) -> dict[str, Any] | None:

@@ -125,3 +125,35 @@ def test_fts_query_terms():
         "how | is | diffusion | model | developing"
     )
     assert fts_query_terms("?!") == ""
+
+
+def test_quotes_are_not_split():
+    s = split_answer('He says, "Now I got the Spark. I can take it! Right?" [S1]. Next [S2].')
+    assert len(s) == 2
+    assert s[0].citations == [1] and s[0].text.startswith('He says, "Now I got the Spark. I can')
+
+
+def test_pinpoint_finds_line_and_frame():
+    c = Citation(
+        n=1,
+        chunk_id=uuid.uuid4(),
+        filename="v.mp4",
+        title=None,
+        context_header=None,
+        locator={
+            "t_start": 0,
+            "t_end": 120,
+            "frames": [{"t": 60, "frame": "f60.jpg"}, {"t": 90, "frame": "f90.jpg"}],
+        },
+        verification_status="unverified",
+        text="[0:00] SPEAKER_00: Hi, welcome to my kitchen.\n\n"
+        "[1:04] SPEAKER_00: Almost 70 trillion operations per second, 25 watts and $249.\n\n"
+        "[1:30] (on screen) A Jetson box. Text: Orin Nano",
+    )
+    s = split_answer("It costs $249 at 25 watts [S1].")[0]
+    from thesiskb.answer.generate import pinpoint
+
+    pinpoint(s, [c])
+    assert len(s.pinpoints) == 1
+    p = s.pinpoints[0]
+    assert (p.t, p.speaker, p.frame) == (64.0, "SPEAKER_00", "f60.jpg")

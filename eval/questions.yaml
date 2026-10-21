@@ -105,7 +105,21 @@ questions:
     expected_facts:
       - Introduces himself as a musician, creator, producer, technocrat, futurist
       - He now has a Spark and can take it with him everywhere he goes
+    # Milestone 4 acceptance: quote attributed to the right speaker, timestamp within ±5 s
+    expected_quotes:
+      - {speaker: Will.i.am, t: 23}
     notes: >
       Tests speaker resolution: the audio has several unnamed speakers, and only the
       self-introduction ties one diarization label to "Will.i.am". Quotes from other speakers
-      must not be attributed to him. Needs Milestone 4 (diarization) + speaker labelling.
+      must not be attributed to him. Needs `tkb speakers label Sparking SPEAKER_xx "Will.i.am"`
+      (Whisper spells him "Will I.M.").
+
+  - id: video-01
+    question: How much does the Jetson Orin Nano Super cost and how fast is it?
+    type: general
+    path: [general]
+    expected_sources: [jetson_video]
+    expected_facts: ["$249", almost 70 trillion operations per second, 25 W]
+    expected_quotes:
+      - {t: 85}   # Whisper word times: "trillion" 1:21.5, "$249" 1:27.4
+    expect_keyframe: true

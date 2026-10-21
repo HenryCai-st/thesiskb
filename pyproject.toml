@@ -24,6 +24,8 @@ dependencies = [
 # GPU/ML stack for real ingestion and reranking (pulls torch; not needed for CI)
 local = [
     "docling>=2.40",
+    "faster-whisper>=1.1",
+    "pyannote.audio>=4.0",
     "sentence-transformers>=3.0",
     "torch>=2.7",
 ]

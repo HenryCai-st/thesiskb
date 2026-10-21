@@ -91,6 +91,12 @@ def merge_locators(locators: list[dict[str, Any]]) -> dict[str, Any]:
     if starts:
         out["t_start"] = min(starts)
         out["t_end"] = max(ends) if ends else None
+    speakers = sorted({loc["speaker"] for loc in locators if loc.get("speaker")})
+    if speakers:
+        out["speakers"] = speakers
+    frames = [{"t": loc["t_start"], "frame": loc["frame"]} for loc in locators if loc.get("frame")]
+    if frames:
+        out["frames"] = frames
     return out
 
 

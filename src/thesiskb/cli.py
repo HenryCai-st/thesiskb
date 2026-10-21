@@ -83,7 +83,7 @@ def ingest(
     ),
     force: bool = typer.Option(False, help="Redo all stages even if already done"),
 ) -> None:
-    """Ingest documents (PDF/Office) and images. Audio/video follow in Milestone 4."""
+    """Ingest documents (PDF/Office), images, audio and video."""
     import logging
     from collections import Counter
 
@@ -165,10 +165,16 @@ def ask(
         "invalid_citation": "[red]⚠ invalid citation[/]",
     }
     console.print()
+    from thesiskb.ingest.audio import ts
+
     for s in ans.sentences:
         flag = marks.get(s.status)
         note = f" [dim]({escape(s.note)})[/]" if flag and s.note else ""
         console.print(escape(s.text) + (f"  {flag}{note}" if flag else ""))
+        for p in s.pinpoints:
+            who = f" {p.speaker}" if p.speaker else " (on screen)"
+            frame = f" · keyframe {ts(p.frame_t)} {p.frame}" if p.frame else ""
+            console.print(f"    [dim]↳ S{p.n} at {ts(p.t)}{escape(who)}{escape(frame)}[/]")
     if not ans.sentences:
         console.print(escape(ans.text))
 
@@ -184,6 +190,122 @@ def ask(
         console.print("[dim]Open a source: tkb open <chunk-id>[/]")
     t = ans.timings
     console.print(f"\n[dim]{' · '.join(f'{k} {v:.1f}s' for k, v in t.items())}[/]")
+
+
+speakers_app = typer.Typer(
+    help="Map diarization labels (SPEAKER_00) to people.", no_args_is_help=True
+)
+app.add_typer(speakers_app, name="speakers")
+
+
+def _resolve_source(session, ref: str):
+    """A source by sha256 prefix or (part of) its filename."""
+    from sqlalchemy import select
+
+    from thesiskb.core.models import Source
+
+    rows = session.scalars(select(Source)).all()
+    hits = [s for s in rows if s.sha256.startswith(ref.lower())] or [
+        s for s in rows if ref.lower() in s.path.rsplit("/", 1)[-1].lower()
+    ]
+    if len(hits) != 1:
+        names = ", ".join(s.path.rsplit("/", 1)[-1] for s in hits[:5]) or "none"
+        console.print(f"[red]'{escape(ref)}' matches {len(hits)} sources ({escape(names)})[/]")
+        raise typer.Exit(code=1)
+    return hits[0]
+
+
+@speakers_app.command("list")
+def speakers_list(source: str = typer.Argument(..., help="sha256 prefix or part of filename")):
+    """Show speakers of a recording with talking time, a sample quote and name suggestions."""
+    from thesiskb.core.db import session_scope
+    from thesiskb.ingest.audio import Transcript, suggest_names, ts
+    from thesiskb.ingest.pipeline import processed_dir, speaker_names
+
+    with session_scope() as session:
+        src = _resolve_source(session, source)
+        path = processed_dir(get_pipeline_config(), src.sha256) / "transcript.json"
+        if not path.exists():
+            console.print("[red]No transcript yet — run tkb ingest first[/]")
+            raise typer.Exit(code=1)
+        transcript = Transcript.model_validate_json(path.read_text("utf-8"))
+        names = speaker_names(session, src)
+        filename = src.path.rsplit("/", 1)[-1]
+    suggestions = suggest_names(transcript)
+
+    table = Table(title=filename)
+    for col in ("Label", "Person", "Suggested", "Talk", "Turns", "First words"):
+        table.add_column(col, overflow="fold")
+    for label in transcript.speakers:
+        turns = [t for t in transcript.turns if t.speaker == label]
+        talk = sum(t.end - t.start for t in turns)
+        first = turns[0]
+        table.add_row(
+            label,
+            names.get(label, "[dim]—[/]"),
+            suggestions.get(label, ""),
+            f"{talk:.0f}s",
+            str(len(turns)),
+            escape(f"[{ts(first.start)}] {first.text[:90]}"),
+        )
+    console.print(table)
+    console.print('[dim]Map one: tkb speakers label <source> <LABEL> "<name>" [--alias ...][/]')
+
+
+@speakers_app.command("label")
+def speakers_label(
+    source: str = typer.Argument(..., help="sha256 prefix or part of filename"),
+    label: str = typer.Argument(..., help="e.g. SPEAKER_03"),
+    name: str = typer.Argument(..., help='Person\'s name, e.g. "Will.i.am"'),
+    alias: list[str] | None = typer.Option(None, "--alias", help="Other spellings (repeatable)"),
+    role: str | None = typer.Option(None, help="e.g. supervisor, interviewee"),
+) -> None:
+    """Map a speaker label to a person, then re-chunk and re-embed the recording."""
+    from sqlalchemy import func, select
+
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Person, Speaker
+    from thesiskb.ingest.pipeline import rechunk
+    from thesiskb.llm import get_gateway
+
+    with session_scope() as session:
+        src = _resolve_source(session, source)
+        spk = session.scalar(
+            select(Speaker).where(Speaker.source_id == src.id, Speaker.diarization_label == label)
+        )
+        if spk is None:
+            console.print(f"[red]{escape(label)} not found; see tkb speakers list {source}[/]")
+            raise typer.Exit(code=1)
+        wanted = name.lower()
+        person = session.scalar(
+            select(Person).where((func.lower(Person.name) == wanted) | Person.aliases.any(name))
+        )
+        if person is None:
+            person = Person(name=name, aliases=[], role=role)
+            session.add(person)
+        person.aliases = sorted(set(person.aliases or []) | set(alias or []))
+        if role:
+            person.role = role
+        session.flush()
+        spk.person_id = person.id
+        session.commit()
+        console.print(f"{label} → {escape(person.name)}; re-indexing {escape(src.path)} …")
+        rechunk(session, src, get_pipeline_config(), get_gateway())
+    console.print("[green]done[/]")
+
+
+@app.command()
+def reindex(source: str = typer.Argument(..., help="sha256 prefix or part of filename")) -> None:
+    """Redo chunk + embed for one source from its cached stage outputs (no GPU models)."""
+    from thesiskb.core.db import session_scope
+    from thesiskb.ingest.pipeline import rechunk
+    from thesiskb.llm import get_gateway
+
+    with session_scope() as session:
+        src = _resolve_source(session, source)
+        name = src.path.rsplit("/", 1)[-1]
+        rechunk(session, src, get_pipeline_config(), get_gateway())
+    console.print(f"[green]re-indexed[/] {escape(name)}")
 
 
 @app.command("open")
@@ -208,6 +330,12 @@ def open_chunk(chunk_id: str) -> None:
         if src.modality == "image" and upright.exists():
             target = upright
         console.print(f"{escape(src.path)} — {locator_label(chunk.locator)}")
+        for fr in chunk.locator.get("frames", []):
+            console.print(f"  keyframe {fr['t']:.1f}s: {escape(fr['frame'])}")
+        if chunk.locator.get("t_start") is not None:
+            console.print(
+                f"[dim]jump to {locator_label(chunk.locator).split('–')[0]} in your player[/]"
+            )
         console.print(f"[dim]opening {escape(str(target))}[/]")
     if hasattr(os, "startfile"):
         os.startfile(target)  # Windows
@@ -268,7 +396,19 @@ def eval_cmd(
         prev = previous_summary(session)
 
     table = Table(title="Eval")
-    for col in ("id", "type", "status", "retrieved", "cited", "refused", "supported", "flags", "s"):
+    cols = (
+        "id",
+        "type",
+        "status",
+        "retrieved",
+        "cited",
+        "refused",
+        "supported",
+        "quote",
+        "flags",
+        "s",
+    )
+    for col in cols:
         table.add_column(col)
     yn = {True: "[green]yes[/]", False: "[red]no[/]", None: "-"}
     for r in results:
@@ -285,6 +425,7 @@ def eval_cmd(
             yn[r.citation_hit],
             yn[r.refused],
             f"{r.supported}/{r.checked}" if r.status == "ran" else "-",
+            yn[r.quote_hit] + ("" if r.keyframe_hit is None else f" kf:{yn[r.keyframe_hit]}"),
             ", ".join(flags),
             f"{r.latency_s}" if r.latency_s is not None else "-",
         )

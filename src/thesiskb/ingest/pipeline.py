@@ -3,6 +3,8 @@
 Stages, run as batches so only one heavy GPU model is loaded at a time:
   parse  documents: Docling → data/processed/<sha>/docling.json   (GPU, Ollama unloaded first)
          images:    VLM + OCR → data/processed/<sha>/image.json   (Ollama vision model only)
+         audio:     Whisper batch, then pyannote batch → transcript.json
+         video:     as audio, then keyframe captions (VLM batch) → frames.json
   chunk  stage output → segments + chunks rows                     (CPU)
   embed  bge-m3 embeddings + tsvector for chunks                   (Ollama embedding model)
 
@@ -21,8 +23,8 @@ from pathlib import Path
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
-from thesiskb.core.config import PipelineConfig, get_settings
-from thesiskb.core.models import Chunk, Job, Segment, Source
+from thesiskb.core.config import PipelineConfig, get_models_config, get_settings
+from thesiskb.core.models import Chunk, Job, Person, Segment, Source, Speaker
 from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
 from thesiskb.ingest.documents import FTS_CONFIG, detect_language, extract_blocks
@@ -32,8 +34,10 @@ from thesiskb.llm.gateway import LLMGateway
 log = logging.getLogger(__name__)
 
 STAGES = ("parse", "chunk", "embed")
-SUPPORTED_MODALITIES = DOCUMENT_MODALITIES | {"image"}
-PARSE_OUTPUT = {"image": "image.json"}  # everything else: docling.json
+SUPPORTED_MODALITIES = DOCUMENT_MODALITIES | {"image", "audio", "video"}
+# parse = model outputs only; turns are built from them in the (cheap) chunk stage.
+# video: frames.json is written last, after diarization.json
+PARSE_OUTPUT = {"image": "image.json", "audio": "diarization.json", "video": "frames.json"}
 EMBED_BATCH = 16
 
 
@@ -102,7 +106,7 @@ def ingest(
     session.commit()
 
     # --- parse: one GPU batch per modality ---
-    todo: dict[str, list[tuple[Source, DetectedFile]]] = {"document": [], "image": []}
+    todo: dict[str, list[tuple[Source, DetectedFile]]] = {"document": [], "image": [], "av": []}
     for s, f in sources:
         if force:
             pass
@@ -111,19 +115,24 @@ def ingest(
         elif parse_output(cfg, s).exists():
             run_stage(session, s, "parse", lambda: None)  # output cached on disk; no GPU work
             continue
-        todo["image" if s.modality == "image" else "document"].append((s, f))
+        group = {"image": "image", "audio": "av", "video": "av"}.get(s.modality, "document")
+        todo[group].append((s, f))
 
     if todo["document"]:
         _parse_documents(session, todo["document"], cfg, report)
     if todo["image"]:
         _parse_images(session, todo["image"], cfg, gateway, report)
+    if todo["av"]:
+        _parse_av(session, todo["av"], cfg, gateway, report, force)
 
     # --- chunk (CPU) ---
     count = get_token_counter()
     for src, f in sources:
         if not job_done(session, src, "parse"):
             continue
-        chunker = _chunk_image if src.modality == "image" else _chunk_document
+        chunker = {"image": _chunk_image, "audio": _chunk_av, "video": _chunk_av}.get(
+            src.modality, _chunk_document
+        )
         work = partial(chunker, session, src, f, cfg, count, metadata_lookup)
         if _safe(report, session, src, f, "chunk", work, force):
             report["chunk"] += 1
@@ -180,6 +189,98 @@ def _parse_images(session, todo, cfg, gateway: LLMGateway, report: IngestReport)
                 report["parse"] += 1
     finally:
         unload_all(settings.ollama_base_url)  # don't leave the VLM next to the answer LLM
+
+
+def _parse_av(session, todo, cfg, gateway: LLMGateway, report: IngestReport, force: bool):
+    """Audio/video parse as model batches: Whisper → pyannote → (video) VLM keyframes.
+
+    Each step's output is cached in data/processed/<sha>/, so a re-run resumes where it failed.
+    """
+    from thesiskb.ingest import audio, video
+    from thesiskb.llm.ollama import unload_all
+
+    settings = get_settings()
+    models = get_models_config()
+    extra = cfg.model_extra or {}
+    failed: dict[str, str] = {}
+    dirs = {src.sha256: processed_dir(cfg, src.sha256) for src, _ in todo}
+
+    def step(name: str, items, fn) -> None:
+        for src, f in items:
+            if src.sha256 in failed:
+                continue
+            try:
+                fn(src, f, dirs[src.sha256])
+            except Exception as e:  # noqa: BLE001 — recorded, batch continues
+                log.exception("%s failed for %s", name, f.path.name)
+                failed[src.sha256] = f"{name}: {type(e).__name__}: {e}"
+
+    def need(filename: str):
+        return [(s, f) for s, f in todo if force or not (dirs[s.sha256] / filename).exists()]
+
+    step(
+        "extract audio",
+        need("audio.wav"),
+        lambda s, f, d: audio.extract_wav(f.path, d / "audio.wav"),
+    )
+
+    unload_all(settings.ollama_base_url)
+    if items := need("asr.json"):
+        asr_cfg = models.role("asr")
+        log.info("transcribe %d file(s) with %s", len(items), asr_cfg.model)
+        tr = audio.Transcriber(
+            asr_cfg.model, (asr_cfg.model_extra or {}).get("compute_type", "float16")
+        )
+        try:
+            step(
+                "transcribe", items, lambda s, f, d: tr.transcribe(d / "audio.wav", d / "asr.json")
+            )
+        finally:
+            tr.close()
+    if items := need("diarization.json"):
+        log.info("diarize %d file(s)", len(items))
+        try:
+            dia = audio.Diarizer(models.role("diarization").model, settings.hf_token)
+        except Exception as e:  # noqa: BLE001 — e.g. missing token: every file fails the same
+            for s, _ in items:
+                failed.setdefault(s.sha256, f"diarize: {type(e).__name__}: {e}")
+        else:
+            try:
+                step(
+                    "diarize",
+                    items,
+                    lambda s, f, d: dia.diarize(d / "audio.wav", d / "diarization.json"),
+                )
+            finally:
+                dia.close()
+
+    videos = [(s, f) for s, f in need("frames.json") if s.modality == "video"]
+    if videos:
+        vcfg = extra.get("video", {})
+        try:
+            step(
+                "keyframes",
+                videos,
+                lambda s, f, d: video.read_keyframes(
+                    gateway,
+                    f.path,
+                    d,
+                    scene_threshold=vcfg.get("scene_threshold", 0.3),
+                    every=vcfg.get("keyframe_fallback_seconds", 30),
+                ),
+            )
+        finally:
+            unload_all(settings.ollama_base_url)
+
+    for src, f in todo:
+        err = failed.get(src.sha256)
+
+        def done(err=err):
+            if err:
+                raise RuntimeError(err)
+
+        if _safe(report, session, src, f, "parse", done, force=True):
+            report["parse"] += 1
 
 
 def _safe(
@@ -301,11 +402,113 @@ def _chunk_image(
     _add_chunks(session, src, drafts, FTS_CONFIG.get(lang, "simple"), lambda d: all_ids)
 
 
+def speaker_names(session: Session, src: Source) -> dict[str, str]:
+    """diarization label → person name, for labels mapped with `tkb speakers label`."""
+    rows = session.execute(
+        select(Speaker.diarization_label, Person.name)
+        .join(Person, Person.id == Speaker.person_id)
+        .where(Speaker.source_id == src.id)
+    ).all()
+    return dict(rows)
+
+
+def _chunk_av(
+    session: Session,
+    src: Source,
+    f: DetectedFile,
+    cfg: PipelineConfig,
+    count,
+    metadata_lookup: bool,
+) -> None:
+    from thesiskb.ingest.audio import build_transcript, transcript_blocks
+    from thesiskb.ingest.video import Keyframe, frame_blocks
+
+    d = processed_dir(cfg, src.sha256)
+    audio_cfg = (cfg.model_extra or {}).get("audio", {})
+    transcript = build_transcript(
+        json.loads((d / "asr.json").read_text("utf-8")),
+        json.loads((d / "diarization.json").read_text("utf-8")),
+        max_turn=audio_cfg.get("max_line_seconds", 0.0),
+    )
+    (d / "transcript.json").write_text(transcript.model_dump_json(), encoding="utf-8")
+    frames = []
+    if (d / "frames.json").exists():
+        frames = [Keyframe(**k) for k in json.loads((d / "frames.json").read_text("utf-8"))]
+    src.language = transcript.language
+    src.pipeline_version = cfg.pipeline_version
+
+    speakers = {
+        s.diarization_label: s
+        for s in session.scalars(select(Speaker).where(Speaker.source_id == src.id))
+    }
+    for label in transcript.speakers:
+        if label not in speakers:
+            speakers[label] = Speaker(source_id=src.id, diarization_label=label)
+            session.add(speakers[label])
+    session.flush()
+
+    window = tuple((cfg.model_extra or {}).get("audio", {}).get("turn_window_seconds", [60, 120]))
+    blocks = transcript_blocks(
+        transcript, speaker_names(session, src), window, frame_blocks(frames)
+    )
+    _replace_rows(session, src)
+    segments = []
+    for b in blocks:
+        label = b.locator.get("speaker")
+        segments.append(
+            Segment(
+                source_id=src.id,
+                kind=b.kind,
+                text=b.text,
+                speaker_id=speakers[label].id if label in speakers else None,
+                locator=b.locator,
+            )
+        )
+    session.add_all(segments)
+    session.flush()
+
+    drafts = chunk_blocks(blocks, cfg.chunking, _short_title(src), count)
+    fts = FTS_CONFIG.get((transcript.language or "en")[:2], "simple")
+    for dft in drafts:
+        a, z = dft.locator.get("t_start", 0), dft.locator.get("t_end") or 0
+        labels = dft.locator.get("speakers", [])
+        session.add(
+            Chunk(
+                source_id=src.id,
+                segment_ids=[s.id for s in segments if a <= s.locator["t_start"] <= z],
+                text=dft.text,
+                context_header=dft.context_header,
+                fts_config=fts,
+                speaker_id=speakers[labels[0]].id if len(labels) == 1 else None,
+                locator=dft.locator,
+            )
+        )
+    src.ingested_at = _now()
+
+
+def rechunk(session: Session, src: Source, cfg: PipelineConfig, gateway: LLMGateway) -> None:
+    """Redo chunk + embed for one source (e.g. after speaker labels changed)."""
+    f = DetectedFile(path=Path(src.path), sha256=src.sha256, modality=src.modality)
+    chunker = {"image": _chunk_image, "audio": _chunk_av, "video": _chunk_av}.get(
+        src.modality, _chunk_document
+    )
+    run_stage(
+        session,
+        src,
+        "chunk",
+        partial(chunker, session, src, f, cfg, get_token_counter(), False),
+        force=True,
+    )
+    run_stage(session, src, "embed", partial(_embed_source, session, src, gateway), force=True)
+
+
 def _short_title(src: Source) -> str:
     """'Paper: <title> (2022)' style prefix for context headers."""
     kind = (src.source_type or "document").capitalize()
     year = f" ({src.published.year})" if src.published else ""
-    title = src.title if src.modality != "image" else src.path.rsplit("/", 1)[-1]
+    title = src.title if src.modality not in ("image",) else src.path.rsplit("/", 1)[-1]
+    if src.modality in ("audio", "video") and title:
+        title = title.replace("_", " ").strip()
     return f"{kind}: {title}{year}"
 
 

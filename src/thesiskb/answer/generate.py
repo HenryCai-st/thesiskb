@@ -34,6 +34,8 @@ Numbers like [377] inside the passages are the source's own references; do not c
 - If the passages answer only part of the question, answer that part and say what is missing.
 - Be concise: a short paragraph or a few bullet points. List dated items in chronological order.
 - Answer in the language of the question.
+- Passages from recordings have lines like "[0:22] Name: text". When you use one, say who said \
+it and when, e.g. "Will.i.am says (0:22) ...". "(on screen)" lines describe what the video shows.
 - Your answer covers only the documents in this knowledge base; when asked about the "state of \
 the art" or trends, say it reflects these documents, not the whole field."""
 
@@ -54,11 +56,23 @@ SentenceStatus = Literal[
 ]
 
 
+class Pinpoint(BaseModel):
+    """The line inside a cited recording chunk that a sentence most likely refers to."""
+
+    n: int  # citation label S<n>
+    t: float  # seconds
+    speaker: str | None = None
+    line: str
+    frame: str | None = None  # nearest keyframe image for video
+    frame_t: float | None = None
+
+
 class Sentence(BaseModel):
     text: str
     citations: list[int] = Field(default_factory=list)
     status: SentenceStatus = "unchecked"
     note: str | None = None
+    pinpoints: list[Pinpoint] = Field(default_factory=list)
 
 
 class Answer(BaseModel):
@@ -118,10 +132,22 @@ _ABBREV = re.compile(
 _PROTECT = "․"  # one-dot leader: stands in for "." inside abbreviations while splitting
 
 
+_QUOTED = re.compile(r"\"[^\"\n]+\"|“[^”\n]+”|„[^“\n]+“")
+# private-use stand-ins for sentence punctuation inside quotes, restored after splitting
+_HIDE = {".": "", "!": "", "?": ""}
+
+
+def _hide_punct(m: re.Match) -> str:
+    return "".join(_HIDE.get(ch, ch) for ch in m.group(0))
+
+
 def split_answer(text: str) -> list[Sentence]:
-    """Split into sentences/bullets, keeping citation markers with their sentence."""
+    """Split into sentences/bullets, keeping citation markers with their sentence.
+    Abbreviations ("et al.") and quoted speech ('"Now I got it. I can take it..."') stay whole."""
     protected = _ABBREV.sub(lambda m: m.group(0)[:-1] + _PROTECT, text)
-    pieces = [p.replace(_PROTECT, ".").strip() for p in _SPLIT.split(protected)]
+    protected = _QUOTED.sub(_hide_punct, protected)
+    restore = {_PROTECT: ".", **{v: k for k, v in _HIDE.items()}}
+    pieces = ["".join(restore.get(ch, ch) for ch in p).strip() for p in _SPLIT.split(protected)]
     sentences: list[Sentence] = []
     for piece in pieces:
         if not piece:
@@ -167,6 +193,84 @@ def _sentence(piece: str) -> Sentence:
     return s
 
 
+_LINE = re.compile(r"^\[(\d+(?::\d{2}){1,2})\] (?:(\(on screen\)) )?(?:([^:\n]{1,60}): )?(.*)$")
+_STOP = {
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "of",
+    "to",
+    "in",
+    "on",
+    "is",
+    "are",
+    "was",
+    "it",
+    "that",
+    "this",
+    "with",
+    "for",
+    "as",
+    "at",
+    "he",
+    "she",
+    "they",
+    "says",
+    "said",
+    "s1",
+    "s2",
+    "s3",
+}
+
+
+def _seconds(stamp: str) -> float:
+    parts = [int(p) for p in stamp.split(":")]
+    return float(sum(p * 60**i for i, p in enumerate(reversed(parts))))
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[\wäöüß']+", text.lower()) if w not in _STOP and len(w) > 2}
+
+
+def pinpoint(sentence: Sentence, cites: list[Citation], min_overlap: float = 0.25) -> None:
+    """For citations of recordings, find the transcript line the sentence draws on.
+
+    Lines look like "[0:22] Will.i.am: ..." (turns) or "[0:35] (on screen) ..." (keyframes).
+    A timestamp written in the sentence ("(0:22)") wins; otherwise word overlap decides.
+    """
+    by_n = {c.n: c for c in cites}
+    words = _content_words(_CITE.sub("", sentence.text))
+    stamps = {_seconds(s) for s in re.findall(r"\b(\d{1,2}:\d{2})\b", sentence.text)}
+    for n in sentence.citations:
+        c = by_n.get(n)
+        if c is None or c.locator.get("t_start") is None:
+            continue
+        best, best_score = None, 0.0
+        for raw in c.text.splitlines():
+            m = _LINE.match(raw.strip())
+            if not m:
+                continue
+            t = _seconds(m.group(1))
+            line_words = _content_words(m.group(4))
+            score = len(words & line_words) / max(1, len(words))
+            if any(abs(t - s) <= 2 for s in stamps):
+                score += 1.0
+            if score > best_score:
+                best_score = score
+                best = Pinpoint(
+                    n=n, t=t, speaker=None if m.group(2) else m.group(3), line=raw.strip()
+                )
+        if best is None or best_score < min_overlap:
+            continue
+        frames = c.locator.get("frames") or []
+        if frames:
+            near = min(frames, key=lambda f: abs(f["t"] - best.t))
+            best.frame, best.frame_t = near["frame"], near["t"]
+        sentence.pinpoints.append(best)
+
+
 def to_chunk_ids(text: str, cites: list[Citation]) -> str:
     by_n = {c.n: c.chunk_id for c in cites}
 
@@ -202,12 +306,15 @@ def generate(gateway: LLMGateway, question: str, hits: list[Hit]) -> Answer:
         role="answer",
     ).strip()
     refused = REFUSAL.rstrip(".").lower() in raw.lower()
+    sentences = split_answer(raw)
+    for s in sentences:
+        pinpoint(s, cites)
     return Answer(
         question=question,
         text=raw,
         text_with_ids=to_chunk_ids(raw, cites),
         refused=refused,
-        sentences=split_answer(raw),
+        sentences=sentences,
         context=cites,
     )
 

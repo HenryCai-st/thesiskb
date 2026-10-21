@@ -59,7 +59,14 @@ def judge_support(gateway: LLMGateway, ans: Answer) -> None:
     for s in ans.sentences:
         if s.status != "unchecked":
             continue
-        passages = "\n\n".join(f"[S{n}] {by_n[n].text}" for n in s.citations)
+        # the header (source title, section) is evidence too, e.g. a video titled "Jetson Orin
+        # Nano Super" whose speaker only says "Jetson Nano Super"
+        passages = "\n\n".join(
+            f"[S{n}] ({by_n[n].context_header})\n{by_n[n].text}"
+            if by_n[n].context_header
+            else f"[S{n}] {by_n[n].text}"
+            for n in s.citations
+        )
         prompt = JUDGE_PROMPT.format(passages=passages, claim=s.text)
         try:
             raw = gateway.chat(

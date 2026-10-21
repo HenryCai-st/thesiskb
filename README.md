@@ -4,8 +4,8 @@ A private, multimodal knowledge base with verified, cited retrieval — papers, 
 whiteboards, meeting recordings and interview videos, all searchable with answers that cite the
 exact page, image or timestamp.
 
-> Status: **Milestone 3 (images)**. PDFs and photos (handwriting, whiteboards, post-its) are
-> indexed and answerable with page or image citations; audio and video follow in Milestone 4.
+> Status: **Milestone 4 (audio & video)**. PDFs, photos, audio and video are indexed and
+> answerable with page, image or timestamp + speaker citations; video answers point at keyframes.
 > See [BUILD_GUIDE.md](BUILD_GUIDE.md) for the full plan and [AGENTS.md](AGENTS.md) for rules
 > coding agents follow.
 
@@ -36,7 +36,16 @@ uv run tkb sources                       # index: original filename ↔ sha256, 
 uv run tkb ask "How is diffusion model developing?" --type paper
 uv run tkb eval                          # gold questions in eval/questions.yaml
 uv run tkb open <chunk-id>               # open a cited file (photos open upright)
+uv run tkb speakers list <file>          # who speaks when, with name suggestions
+uv run tkb speakers label <file> SPEAKER_03 "Will.i.am" --alias "Will I.M"
+uv run tkb reindex <file>                # redo chunk + embed from cached outputs (no GPU)
 ```
+
+Recordings are transcribed with faster-whisper and split into speakers with pyannote; answers
+show each quote's speaker and timestamp (`↳ S1 at 0:22 Will.i.am`) and, for video, the nearest
+keyframe. Speaker separation needs a Hugging Face read token (`TKB_HF_TOKEN` in `.env`) and
+accepted terms for `pyannote/speaker-diarization-community-1`. See
+[ADR 0005](docs/adr/0005-audio-video.md).
 
 Photos are turned upright automatically (the rotation the vision model reads most
 confidently), transcribed by the vision model, and also OCR'd with Tesseract; both readings are
@@ -70,7 +79,7 @@ src/thesiskb/
   core/            settings, YAML config, DB engine, ORM models
   llm/             LiteLLM gateway: chat(), embed(), rerank(); Ollama VRAM housekeeping
   ingest/          detect (hash/dedupe), documents (Docling), images (VLM + OCR),
-                   chunking, metadata, pipeline
+                   audio (Whisper + pyannote), video (keyframes), chunking, metadata, pipeline
   retrieval/       hybrid search (pgvector + FTS, RRF), cross-encoder rerank
   answer/          cited answer generation, citation + support verification
   evaluation.py    `tkb eval`
