@@ -5,8 +5,10 @@
 # path:   which router path should answer it (Milestone 6); lists mean multi-path.
 # expected_facts: short facts a correct answer must contain (checked by an LLM judge).
 # expected_tasks: for task questions, rows the extraction must produce (recall is measured on these).
-# Video/audio facts were taken from the YouTube subtitles in data/reference/ (checked by the user
-# against the video). data/reference/ is for grading only and is never ingested.
+# Video/audio facts and quote times come from the YouTube subtitles (.txt/.vtt) in data/reference/
+# (checked by the user against the video). data/reference/ is for grading only, never ingested.
+# Whisper vs VTT (eval/calibrate_vtt.py): median |offset| 0.42 s (audio) / 0.16 s (video),
+# no systematic shift, so no timestamp correction is applied.
 
 fixtures:
   survey: 2209.00796v15.pdf                      # Yang et al., "Diffusion Models: A Comprehensive Survey..." (59 p.)
@@ -105,9 +107,10 @@ questions:
     expected_facts:
       - Introduces himself as a musician, creator, producer, technocrat, futurist
       - He now has a Spark and can take it with him everywhere he goes
-    # Milestone 4 acceptance: quote attributed to the right speaker, timestamp within ±5 s
+    # Milestone 4 acceptance: quote attributed to the right speaker, timestamp within ±5 s.
+    # Times from the YouTube VTT (eval/calibrate_vtt.py), independent of Whisper.
     expected_quotes:
-      - {speaker: Will.i.am, t: 23}
+      - {speaker: Will.i.am, t: 21.5}   # VTT "My name is"; Whisper 22.8
     notes: >
       Tests speaker resolution: the audio has several unnamed speakers, and only the
       self-introduction ties one diarization label to "Will.i.am". Quotes from other speakers
@@ -121,5 +124,5 @@ questions:
     expected_sources: [jetson_video]
     expected_facts: ["$249", almost 70 trillion operations per second, 25 W]
     expected_quotes:
-      - {t: 85}   # Whisper word times: "trillion" 1:21.5, "$249" 1:27.4
+      - {t: 81.8}   # VTT "trillion operations"; Whisper 81.5
     expect_keyframe: true
