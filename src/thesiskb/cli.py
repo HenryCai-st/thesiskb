@@ -82,6 +82,9 @@ def ingest(
         None, "--type", help="paper|book|note|meeting|interview|demo (default: by file type)"
     ),
     force: bool = typer.Option(False, help="Redo all stages even if already done"),
+    extract: bool = typer.Option(
+        True, help="Run LLM extraction (tasks, statements, entities); slow on long papers"
+    ),
 ) -> None:
     """Ingest documents (PDF/Office), images, audio and video."""
     import logging
@@ -116,6 +119,7 @@ def ingest(
             source_type=source_type,
             force=force,
             metadata_lookup=bool((cfg.model_extra or {}).get("metadata_lookup", True)),
+            extract=extract,
         )
     failed = report.pop("failed")
     work = ", ".join(f"{stage}: {n}" for stage, n in report.items())
@@ -136,23 +140,30 @@ def ask(
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip the LLM support check"),
     show_context: bool = typer.Option(False, help="Also print every retrieved passage"),
     as_json: bool = typer.Option(False, "--json", help="Print the full Answer as JSON"),
+    path: str = typer.Option(
+        "search", help="search = hybrid RAG over chunks; task = answer from the tasks table"
+    ),
 ) -> None:
     """Answer a question from the knowledge base, with citations."""
     from thesiskb.answer.generate import answer_question, locator_label
+    from thesiskb.answer.tasks import answer_tasks
     from thesiskb.core.db import session_scope
     from thesiskb.llm import get_gateway
     from thesiskb.retrieval.hybrid import SearchFilters
 
     filters = SearchFilters(source_types=source_type or None, verified_only=verified_only)
     with session_scope() as session:
-        ans = answer_question(
-            session,
-            get_gateway(),
-            question,
-            get_pipeline_config().retrieval,
-            filters,
-            verify_support=not no_verify,
-        )
+        if path == "task":
+            ans = answer_tasks(session, get_gateway(), question, verify_support=not no_verify)
+        else:
+            ans = answer_question(
+                session,
+                get_gateway(),
+                question,
+                get_pipeline_config().retrieval,
+                filters,
+                verify_support=not no_verify,
+            )
     if as_json:
         import sys
 
@@ -261,7 +272,7 @@ def speakers_label(
     role: str | None = typer.Option(None, help="e.g. supervisor, interviewee"),
 ) -> None:
     """Map a speaker label to a person, then re-chunk and re-embed the recording."""
-    from sqlalchemy import func, select
+    from sqlalchemy import any_, func, select
 
     from thesiskb.core.db import session_scope
     from thesiskb.core.models import Person, Speaker
@@ -278,7 +289,9 @@ def speakers_label(
             raise typer.Exit(code=1)
         wanted = name.lower()
         person = session.scalar(
-            select(Person).where((func.lower(Person.name) == wanted) | Person.aliases.any(name))
+            select(Person).where(
+                (func.lower(Person.name) == wanted) | (name == any_(Person.aliases))
+            )
         )
         if person is None:
             person = Person(name=name, aliases=[], role=role)
@@ -292,6 +305,172 @@ def speakers_label(
         console.print(f"{label} → {escape(person.name)}; re-indexing {escape(src.path)} …")
         rechunk(session, src, get_pipeline_config(), get_gateway())
     console.print("[green]done[/]")
+
+
+tasks_app = typer.Typer(
+    help="Tasks extracted from notes and meetings.", invoke_without_command=True
+)
+app.add_typer(tasks_app, name="tasks")
+
+
+def _task_by_prefix(session, prefix: str):
+    from sqlalchemy import String, cast, select
+
+    from thesiskb.core.models import Task
+
+    hits = session.scalars(select(Task).where(cast(Task.id, String).like(f"{prefix}%"))).all()
+    if len(hits) != 1:
+        console.print(f"[red]'{escape(prefix)}' matches {len(hits)} tasks[/]")
+        raise typer.Exit(code=1)
+    return hits[0]
+
+
+@tasks_app.callback()
+def tasks_list(
+    ctx: typer.Context,
+    all_: bool = typer.Option(False, "--all", help="Include done tasks"),
+) -> None:
+    """List open tasks by due date (no subcommand), or review/confirm/done them."""
+    if ctx.invoked_subcommand:
+        return
+    from thesiskb.answer.generate import locator_label
+    from thesiskb.answer.tasks import open_tasks
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Chunk, Source
+
+    table = Table(title="Tasks")
+    for col in ("id", "Due", "Written", "Task", "Owner", "Status", "✓", "Source"):
+        table.add_column(col, overflow="fold")
+    with session_scope() as session:
+        for t, owner in open_tasks(session, include_done=all_):
+            src = session.get(Source, t.source_id) if t.source_id else None
+            chunk = session.get(Chunk, t.source_chunk_id) if t.source_chunk_id else None
+            where = src.path.rsplit("/", 1)[-1] if src else "?"
+            if chunk:
+                where += f", {locator_label(chunk.locator)}"
+            elif src:
+                where += " [red](evidence link lost)[/]"
+            table.add_row(
+                str(t.id)[:8],
+                t.due_date.isoformat() if t.due_date else "—",
+                escape(t.due_raw or ""),
+                escape(t.description),
+                escape(owner or t.owner_raw or ""),
+                t.status,
+                "✓" if t.confirmed else "",
+                where,
+            )
+    console.print(table)
+    console.print("[dim]tkb tasks review · tkb tasks done <id> · tkb tasks confirm <id>[/]")
+
+
+@tasks_app.command("review")
+def tasks_review() -> None:
+    """Go through unconfirmed tasks: confirm, edit, delete or skip each one."""
+    from datetime import date
+
+    from sqlalchemy import select
+
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Task
+    from thesiskb.ingest.dates import resolve_due
+
+    with session_scope() as session:
+        todo = session.scalars(
+            select(Task).where(Task.confirmed.is_(False)).order_by(Task.due_date)
+        ).all()
+        if not todo:
+            console.print("Nothing to review.")
+            return
+        for t in todo:
+            console.print(
+                f"\n[bold]{escape(t.description)}[/]  due {t.due_date or '—'} "
+                f"(written: {escape(t.due_raw or '—')}), owner: {escape(t.owner_raw or '—')}\n"
+                f'  [dim]evidence: "{escape(t.evidence_quote or "")}"[/]'
+            )
+            choice = typer.prompt("[c]onfirm / [e]dit / [d]elete / [s]kip / [q]uit", default="c")
+            if choice.startswith("q"):
+                break
+            if choice.startswith("d"):
+                session.delete(t)
+            elif choice.startswith("e"):
+                t.description = typer.prompt("description", default=t.description)
+                t.owner_raw = typer.prompt("owner", default=t.owner_raw or "") or None
+                due = typer.prompt(
+                    "due (as written, e.g. 2027-01-31 or Jan 2027)", default=t.due_raw or ""
+                )
+                if due != (t.due_raw or ""):
+                    t.due_raw = due or None
+                    t.due_date = resolve_due(due, t.due_date or date.today())
+                t.confirmed = True
+            elif choice.startswith("c"):
+                t.confirmed = True
+            session.commit()
+    console.print("[green]saved[/]")
+
+
+@tasks_app.command("confirm")
+def tasks_confirm(task_id: str) -> None:
+    """Mark a task as checked by you (kept even when its source is re-extracted)."""
+    from thesiskb.core.db import session_scope
+
+    with session_scope() as session:
+        t = _task_by_prefix(session, task_id)
+        t.confirmed = True
+        console.print(f"confirmed: {escape(t.description)}")
+
+
+@tasks_app.command("done")
+def tasks_done(task_id: str) -> None:
+    """Mark a task as done (also confirms it)."""
+    from thesiskb.core.db import session_scope
+
+    with session_scope() as session:
+        t = _task_by_prefix(session, task_id)
+        t.status, t.confirmed = "done", True
+        console.print(f"done: {escape(t.description)}")
+
+
+@app.command()
+def statements(
+    person: str | None = typer.Option(None, help="Name, alias or speaker label (e.g. SPEAKER_02)"),
+) -> None:
+    """What people say or prefer (extracted from recordings), with evidence."""
+    from sqlalchemy import select
+
+    from thesiskb.answer.generate import locator_label
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Chunk, Person, Source, Statement
+    from thesiskb.ingest.extract import quote_in, resolve_person
+
+    table = Table(title="Statements")
+    for col in ("Person", "Topic", "Stance", "Source"):
+        table.add_column(col, overflow="fold")
+    with session_scope() as session:
+        stmt = select(Statement, Person.name).outerjoin(Person, Person.id == Statement.person_id)
+        if person:
+            p = resolve_person(session, person)
+            stmt = stmt.where(
+                (Statement.person_id == p.id) if p else (Statement.person_raw == person)
+            )
+        for st, name in session.execute(stmt.order_by(Person.name, Statement.person_raw)):
+            src = session.get(Source, st.source_id)
+            chunk = session.get(Chunk, st.source_chunk_id) if st.source_chunk_id else None
+            where = src.path.rsplit("/", 1)[-1][:40]
+            if chunk:
+                # the transcript line holding the quote gives the exact time
+                line = next(
+                    (ln for ln in chunk.text.splitlines() if quote_in(st.evidence_quote, ln)), ""
+                )
+                stamp = line[1 : line.index("]")] if line.startswith("[") and "]" in line else ""
+                where += f", {stamp or locator_label(chunk.locator)}"
+            table.add_row(
+                escape(name or st.person_raw or "?"),
+                escape(st.topic),
+                escape(st.stance) + f'\n[dim]"{escape(st.evidence_quote)}"[/]',
+                escape(where),
+            )
+    console.print(table)
 
 
 @app.command()

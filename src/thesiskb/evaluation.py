@@ -13,8 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from thesiskb.answer.generate import answer_question
+from thesiskb.answer.tasks import answer_tasks
 from thesiskb.core.config import REPO_ROOT, RetrievalConfig
-from thesiskb.core.models import Chunk, EvalRun, Source
+from thesiskb.core.models import Chunk, EvalRun, Source, Task
 from thesiskb.llm.gateway import LLMGateway
 from thesiskb.retrieval.hybrid import SearchFilters
 
@@ -83,9 +84,12 @@ def run_eval(
         expected = {by_name[n].id for n in names}
         paths = [q.path] if isinstance(q.path, str) else q.path
         source_types = PATH_FILTERS.get(paths[0]) if len(paths) == 1 else None
-        ans = answer_question(
-            session, gateway, q.question, cfg, SearchFilters(source_types=source_types)
-        )
+        if paths == ["task"]:
+            ans = answer_tasks(session, gateway, q.question)  # Q3: SQL, not free generation
+        else:
+            ans = answer_question(
+                session, gateway, q.question, cfg, SearchFilters(source_types=source_types)
+            )
         chunk_source = {c.chunk_id: _chunk_source(session, c.chunk_id) for c in ans.context}
         cited_sources = {chunk_source[c.chunk_id] for c in ans.cited}
         pins = [p for s in ans.sentences for p in s.pinpoints]
@@ -123,6 +127,7 @@ def run_eval(
         )
 
     summary = summarize(results)
+    summary |= task_metrics(session, fixtures, questions, by_name)
     session.add(
         EvalRun(
             git_sha=_git_sha(),
@@ -153,6 +158,57 @@ def summarize(results: list[QuestionResult]) -> dict[str, Any]:
         "quote_hit_rate": _rate([r.quote_hit for r in ran]),
         "keyframe_hit_rate": _rate([r.keyframe_hit for r in ran]),
         "mean_latency_s": round(sum(r.latency_s or 0 for r in ran) / n, 1),
+    }
+
+
+_STOP = {"the", "a", "an", "of", "with", "and", "to", "for", "on", "in", "my"}
+
+
+def _words(text: str) -> set[str]:
+    import re
+
+    return {w for w in re.findall(r"[\w-]+", text.lower().replace("-", " ")) if w not in _STOP}
+
+
+def match_task(expected: dict[str, Any], tasks: list[Task]) -> Task | None:
+    """Same due date (if the gold row has one) and ≥ half of the gold description's words."""
+    want = _words(str(expected["description"]))
+    for t in tasks:
+        if expected.get("due_date") and str(t.due_date) != str(expected["due_date"]):
+            continue
+        if len(want & _words(t.description)) >= max(1, len(want) / 2):
+            return t
+    return None
+
+
+def task_metrics(session: Session, fixtures, questions, by_name) -> dict[str, Any]:
+    """Recall of gold task rows (expected_tasks) and tasks lacking a valid evidence link."""
+    from thesiskb.ingest.extract import quote_in
+
+    found = total = 0
+    missed: list[str] = []
+    for q in questions:
+        rows = (q.model_extra or {}).get("expected_tasks") or []
+        names = [fixtures.get(s, s) for s in q.expected_sources]
+        if not rows or not all(n in by_name for n in names):
+            continue
+        src_ids = [by_name[n].id for n in names]
+        tasks = session.scalars(select(Task).where(Task.source_id.in_(src_ids))).all()
+        for row in rows:
+            total += 1
+            if match_task(row, tasks):
+                found += 1
+            else:
+                missed.append(f"{q.id}: {row['description']}")
+    bad = 0
+    for t in session.scalars(select(Task)):
+        chunk = session.get(Chunk, t.source_chunk_id) if t.source_chunk_id else None
+        if chunk is None or not t.evidence_quote or not quote_in(t.evidence_quote, chunk.text):
+            bad += 1
+    return {
+        "task_recall": round(found / total, 3) if total else None,
+        "tasks_missed": missed,
+        "tasks_without_evidence": bad,
     }
 
 

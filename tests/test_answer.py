@@ -157,3 +157,14 @@ def test_pinpoint_finds_line_and_frame():
     assert len(s.pinpoints) == 1
     p = s.pinpoints[0]
     assert (p.t, p.speaker, p.frame) == (64.0, "SPEAKER_00", "f60.jpg")
+
+
+def test_numbered_list_items_stay_whole():
+    s = split_answer(
+        "Schedule [S1]:\n1. **Proposal** - due 10.10.2026 [S1]\n2. **Final** - March [S2]"
+    )
+    assert [x.text for x in s[1:]] == [
+        "1. **Proposal** - due 10.10.2026 [S1]",
+        "2. **Final** - March [S2]",
+    ]
+    assert [x.citations for x in s[1:]] == [[1], [2]]

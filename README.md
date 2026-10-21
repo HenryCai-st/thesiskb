@@ -4,8 +4,9 @@ A private, multimodal knowledge base with verified, cited retrieval — papers, 
 whiteboards, meeting recordings and interview videos, all searchable with answers that cite the
 exact page, image or timestamp.
 
-> Status: **Milestone 4 (audio & video)**. PDFs, photos, audio and video are indexed and
-> answerable with page, image or timestamp + speaker citations; video answers point at keyframes.
+> Status: **Milestone 5 (extraction)**. PDFs, photos, audio and video are indexed and answerable
+> with page, image or timestamp + speaker citations. Tasks, people's statements and entities are
+> extracted into tables; task questions are answered from SQL.
 > See [BUILD_GUIDE.md](BUILD_GUIDE.md) for the full plan and [AGENTS.md](AGENTS.md) for rules
 > coding agents follow.
 
@@ -39,6 +40,10 @@ uv run tkb open <chunk-id>               # open a cited file (photos open uprigh
 uv run tkb speakers list <file>          # who speaks when, with name suggestions
 uv run tkb speakers label <file> SPEAKER_03 "Will.i.am" --alias "Will I.M"
 uv run tkb reindex <file>                # redo chunk + embed from cached outputs (no GPU)
+uv run tkb tasks                         # open tasks by due date, each linked to its evidence
+uv run tkb tasks review                  # confirm / edit / delete extracted tasks
+uv run tkb ask "Show me my thesis schedule" --path task   # answered from the tasks table
+uv run tkb statements --person "Will.i.am"
 ```
 
 Recordings are transcribed with faster-whisper and split into speakers with pyannote; answers
@@ -79,9 +84,10 @@ src/thesiskb/
   core/            settings, YAML config, DB engine, ORM models
   llm/             LiteLLM gateway: chat(), embed(), rerank(); Ollama VRAM housekeeping
   ingest/          detect (hash/dedupe), documents (Docling), images (VLM + OCR),
-                   audio (Whisper + pyannote), video (keyframes), chunking, metadata, pipeline
+                   audio (Whisper + pyannote), video (keyframes), chunking, metadata,
+                   extract (tasks/statements/entities), dates, pipeline
   retrieval/       hybrid search (pgvector + FTS, RRF), cross-encoder rerank
-  answer/          cited answer generation, citation + support verification
+  answer/          cited answer generation, task path (SQL), citation + support checks
   evaluation.py    `tkb eval`
   migrations/      Alembic migrations
   doctor.py        environment checks

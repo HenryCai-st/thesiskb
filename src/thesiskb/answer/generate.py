@@ -133,6 +133,7 @@ _PROTECT = "․"  # one-dot leader: stands in for "." inside abbreviations while
 
 
 _QUOTED = re.compile(r"\"[^\"\n]+\"|“[^”\n]+”|„[^“\n]+“")
+_LIST_NUMBER = re.compile(r"(?m)^(\s*\d{1,3})\.(?=\s)")
 # private-use stand-ins for sentence punctuation inside quotes, restored after splitting
 _HIDE = {".": "", "!": "", "?": ""}
 
@@ -145,6 +146,7 @@ def split_answer(text: str) -> list[Sentence]:
     """Split into sentences/bullets, keeping citation markers with their sentence.
     Abbreviations ("et al.") and quoted speech ('"Now I got it. I can take it..."') stay whole."""
     protected = _ABBREV.sub(lambda m: m.group(0)[:-1] + _PROTECT, text)
+    protected = _LIST_NUMBER.sub(lambda m: m.group(1) + _PROTECT, protected)  # "1. Proposal"
     protected = _QUOTED.sub(_hide_punct, protected)
     restore = {_PROTECT: ".", **{v: k for k, v in _HIDE.items()}}
     pieces = ["".join(restore.get(ch, ch) for ch in p).strip() for p in _SPLIT.split(protected)]

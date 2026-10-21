@@ -142,6 +142,8 @@ class Entity(Base):
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     aliases: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
 
+    __table_args__ = (Index("ix_entities_lower_name", func.lower(name)),)
+
 
 class Relation(Base):
     __tablename__ = "relations"
@@ -170,13 +172,64 @@ class Task(Base):
     due_date: Mapped[date | None] = mapped_column(Date)
     due_raw: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
-    source_chunk_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False
+    # chunk link is SET NULL on re-index and restored from evidence_quote; source_id stays
+    source_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("chunks.id", ondelete="SET NULL")
     )
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE")
+    )
+    evidence_quote: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Float)
     confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
-    __table_args__ = (Index("ix_tasks_due_date", "due_date"),)
+    __table_args__ = (
+        Index("ix_tasks_due_date", "due_date"),
+        Index("ix_tasks_source_id", "source_id"),
+    )
+
+
+class Statement(Base):
+    """What a person says or prefers about a topic, with a verbatim evidence quote."""
+
+    __tablename__ = "statements"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL")
+    )
+    person_raw: Mapped[str | None] = mapped_column(Text)
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    stance: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_quote: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    source_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("chunks.id", ondelete="SET NULL")
+    )
+    confidence: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        Index("ix_statements_person_id", "person_id"),
+        Index("ix_statements_source_id", "source_id"),
+    )
+
+
+class EntityMention(Base):
+    __tablename__ = "entity_mentions"
+
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("entities.id", ondelete="CASCADE"), primary_key=True
+    )
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("chunks.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    __table_args__ = (Index("ix_entity_mentions_chunk_id", "chunk_id"),)
 
 
 class Job(Base):

@@ -25,10 +25,15 @@ roles:
       reasoning_effort: none
 
   extraction:
+    # Structured output (JSON schema) per chunk; thinking off — it doubles latency and the
+    # evidence-quote check catches hallucinated items anyway.
     model: ollama_chat/qwen3:14b
-    vram_gb: 10
+    vram_gb: 12
     params:
       temperature: 0.0
+      num_ctx: 8192
+      max_tokens: 3000
+      reasoning_effort: none
 
   vision:
     # Served by Ollama's OpenAI-compatible endpoint: unlike LiteLLM's ollama_chat provider it

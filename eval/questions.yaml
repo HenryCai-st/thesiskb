@@ -70,7 +70,9 @@ questions:
     expected_sources: [schedule]
     expected_tasks:
       - {description: Thesis proposal, due_raw: "10.10.2026", due_date: 2026-10-10}
-      - {description: Start thesis (weekly meeting with supervisor), due_raw: "Nov", due_date: 2026-11-30}
+      - {description: Start thesis, due_raw: "Nov", due_date: 2026-11-30}
+      # undated recurring item written under "Start thesis" (was merged into it until M5)
+      - {description: Weekly meeting with supervisor}
       - {description: Mid-term presentation, due_raw: "Jan 2027", due_date: 2027-01-31}
       - {description: Final, due_raw: "March", due_date: 2027-03-31}
       - {description: Submission, due_raw: "05.2027", due_date: 2027-05-31}

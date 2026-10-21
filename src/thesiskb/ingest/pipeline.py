@@ -7,6 +7,7 @@ Stages, run as batches so only one heavy GPU model is loaded at a time:
          video:     as audio, then keyframe captions (VLM batch) → frames.json
   chunk  stage output → segments + chunks rows                     (CPU)
   embed  bge-m3 embeddings + tsvector for chunks                   (Ollama embedding model)
+  extract tasks / statements / entities per chunk → extract.json   (answer-size LLM)
 
 A parse output already on disk counts as done, so re-ingesting after a DB reset needs no GPU.
 """
@@ -33,7 +34,7 @@ from thesiskb.llm.gateway import LLMGateway
 
 log = logging.getLogger(__name__)
 
-STAGES = ("parse", "chunk", "embed")
+STAGES = ("parse", "chunk", "embed", "extract")
 SUPPORTED_MODALITIES = DOCUMENT_MODALITIES | {"image", "audio", "video"}
 # parse = model outputs only; turns are built from them in the (cheap) chunk stage.
 # video: frames.json is written last, after diarization.json
@@ -97,6 +98,7 @@ def ingest(
     source_type: str | None = None,
     force: bool = False,
     metadata_lookup: bool = True,
+    extract: bool = True,
 ) -> IngestReport:
     report = IngestReport({s: 0 for s in STAGES})
     report["failed"] = []
@@ -136,8 +138,10 @@ def ingest(
         work = partial(chunker, session, src, f, cfg, count, metadata_lookup)
         if _safe(report, session, src, f, "chunk", work, force):
             report["chunk"] += 1
-            # new chunks invalidate old embeddings
-            session.execute(delete(Job).where(Job.source_id == src.id, Job.stage == "embed"))
+            # new chunks invalidate old embeddings and extractions
+            session.execute(
+                delete(Job).where(Job.source_id == src.id, Job.stage.in_(("embed", "extract")))
+            )
             session.commit()
 
     # --- embed (Ollama bge-m3) ---
@@ -147,7 +151,34 @@ def ingest(
         work = partial(_embed_source, session, src, gateway)
         if _safe(report, session, src, f, "embed", work, force):
             report["embed"] += 1
+
+    # --- extract (answer-size LLM; cached per chunk text) ---
+    if extract:
+        for src, f in sources:
+            if not job_done(session, src, "embed"):
+                continue
+            work = partial(_extract_source, session, src, cfg, gateway)
+            if _safe(report, session, src, f, "extract", work, force):
+                report["extract"] += 1
     return report
+
+
+def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway) -> None:
+    from thesiskb.ingest.extract import extract_source
+
+    rep = extract_source(session, src, gateway, processed_dir(cfg, src.sha256) / "extract.json")
+    log.info(
+        "extract %s: %d chunks (%d LLM calls) → %d tasks, %d statements, %d entity mentions, "
+        "%d relations; %d items dropped without verbatim evidence",
+        src.path.rsplit("/", 1)[-1],
+        rep.chunks,
+        rep.llm_calls,
+        rep.tasks,
+        rep.statements,
+        rep.entities,
+        rep.relations,
+        rep.dropped_no_evidence,
+    )
 
 
 def _parse_documents(session, todo, cfg: PipelineConfig, report: IngestReport) -> None:
@@ -500,6 +531,9 @@ def rechunk(session: Session, src: Source, cfg: PipelineConfig, gateway: LLMGate
         force=True,
     )
     run_stage(session, src, "embed", partial(_embed_source, session, src, gateway), force=True)
+    run_stage(
+        session, src, "extract", partial(_extract_source, session, src, cfg, gateway), force=True
+    )
 
 
 def _short_title(src: Source) -> str:

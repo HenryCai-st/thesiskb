@@ -1,0 +1,111 @@
+"""Task path (Q3: "who does what until when?"): rows come from SQL, the LLM only phrases them.
+
+Each open task becomes a passage [S<n>] — its due date (resolved), description, owner and the
+verbatim evidence quote — cited back to the chunk it was extracted from, so the usual citation
+checks and the support judge apply unchanged.
+"""
+
+from __future__ import annotations
+
+import time
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from thesiskb.answer.generate import REFUSAL, Answer, Citation, pinpoint, split_answer, to_chunk_ids
+from thesiskb.core.models import Chunk, Person, Source, Task
+from thesiskb.llm.gateway import LLMGateway
+
+TASK_PROMPT = f"""You answer questions about the user's tasks, deadlines and milestones using ONLY \
+the numbered task rows below. They come from the user's task table and are already sorted by due \
+date.
+
+Rules:
+- End every sentence and bullet with the label(s) of the row(s) it uses, like [S2].
+- Keep the given order (chronological) when listing several rows; give due dates as written in \
+the row ("due" is the resolved date, "written" is how the source wrote it).
+- If the rows do not answer the question, reply exactly: "{REFUSAL}"
+- Answer in the language of the question. Be concise."""
+
+
+def open_tasks(session: Session, include_done: bool = False) -> list[tuple[Task, str | None]]:
+    stmt = (
+        select(Task, Person.name)
+        .outerjoin(Person, Person.id == Task.owner_person_id)
+        .order_by(Task.due_date.is_(None), Task.due_date, Task.description)
+    )
+    if not include_done:
+        stmt = stmt.where(Task.status != "done")
+    return list(session.execute(stmt).all())
+
+
+def task_row_text(t: Task, owner: str | None) -> str:
+    due = t.due_date.isoformat() if t.due_date else "no date"
+    written = f" (written: {t.due_raw})" if t.due_raw else ""
+    who = owner or t.owner_raw or "unassigned"
+    flags = f" | status: {t.status}" + (" | confirmed" if t.confirmed else "")
+    evidence = f'\nevidence: "{t.evidence_quote}"' if t.evidence_quote else ""
+    return f"Task: {t.description} | due {due}{written} | owner: {who}{flags}{evidence}"
+
+
+def task_citations(session: Session, rows: list[tuple[Task, str | None]]) -> list[Citation]:
+    cites = []
+    for t, owner in rows:
+        chunk = session.get(Chunk, t.source_chunk_id) if t.source_chunk_id else None
+        src = session.get(Source, t.source_id) if t.source_id else None
+        if chunk is None or src is None:
+            continue  # no evidence link: never shown as a fact
+        cites.append(
+            Citation(
+                n=len(cites) + 1,
+                chunk_id=chunk.id,
+                filename=src.path.rsplit("/", 1)[-1],
+                title=src.title,
+                context_header=chunk.context_header,
+                locator=chunk.locator,
+                verification_status=src.verification_status,
+                text=task_row_text(t, owner),
+            )
+        )
+    return cites
+
+
+def answer_tasks(
+    session: Session, gateway: LLMGateway, question: str, verify_support: bool = True
+) -> Answer:
+    from thesiskb.answer.verify import verify
+
+    t0 = time.perf_counter()
+    cites = task_citations(session, open_tasks(session))
+    t1 = time.perf_counter()
+    if not cites:
+        return Answer(
+            question=question,
+            text=REFUSAL,
+            text_with_ids=REFUSAL,
+            refused=True,
+            timings={"sql": t1 - t0},
+        )
+    context = "\n\n".join(f"[S{c.n}] {c.text}" for c in cites)
+    raw = gateway.chat(
+        [
+            {"role": "system", "content": TASK_PROMPT},
+            {"role": "user", "content": f"Task rows:\n\n{context}\n\nQuestion: {question}"},
+        ],
+        role="answer",
+    ).strip()
+    sentences = split_answer(raw)
+    for s in sentences:
+        pinpoint(s, cites)
+    ans = Answer(
+        question=question,
+        text=raw,
+        text_with_ids=to_chunk_ids(raw, cites),
+        refused=REFUSAL.rstrip(".").lower() in raw.lower(),
+        sentences=sentences,
+        context=cites,
+    )
+    t2 = time.perf_counter()
+    verify(gateway, ans, check_support=verify_support and not ans.refused)
+    ans.timings = {"sql": t1 - t0, "generate": t2 - t1, "verify": time.perf_counter() - t2}
+    return ans
