@@ -16,6 +16,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
+    "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "rich>=13.7",
     "sqlalchemy>=2.0",
@@ -83,5 +84,6 @@ testpaths = ["tests"]
 markers = [
     "gpu: needs a CUDA GPU and real models (skipped in CI)",
     "db: needs a running Postgres with pgvector (TKB_DATABASE_URL)",
+    "integration: real parsers on CPU with synthetic files (uv run pytest -m integration)",
 ]
-addopts = "-m 'not gpu'"
+addopts = "-m 'not gpu and not integration'"

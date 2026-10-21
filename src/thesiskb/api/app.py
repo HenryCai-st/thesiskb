@@ -165,12 +165,13 @@ def ingest(req: IngestRequest, background: BackgroundTasks) -> dict[str, Any]:
 def _run_ingest(paths: list[Path], source_type: str | None, extract: bool) -> None:
     from thesiskb.core.db import session_scope
     from thesiskb.ingest.detect import detect
-    from thesiskb.ingest.pipeline import SUPPORTED_MODALITIES
     from thesiskb.ingest.pipeline import ingest as run_ingest
+    from thesiskb.ingest.pipeline import supported_modalities
     from thesiskb.llm import get_gateway
 
     cfg = get_pipeline_config()
-    files = [f for f in detect(paths) if f.modality in SUPPORTED_MODALITIES]
+    modalities = supported_modalities(cfg)
+    files = [f for f in detect(paths) if f.modality in modalities]
     with _answer_lock, session_scope() as session:  # GPU: no questions while ingesting
         report = run_ingest(
             session, files, cfg, get_gateway(), source_type=source_type, extract=extract

@@ -109,11 +109,13 @@ def extract_frames(video: Path, times: list[float], out_dir: Path, ffmpeg: str =
     return frames
 
 
-def caption_frames(gateway: LLMGateway, frames: list[Keyframe]) -> list[Keyframe]:
+def caption_frames(
+    gateway: LLMGateway, frames: list[Keyframe], role: str = "vision"
+) -> list[Keyframe]:
     for f in frames:
         jpeg = Path(f.path).read_bytes()
         f.caption = gateway.chat(
-            image_message(FRAME_PROMPT.format(t=ts(f.t)), jpeg), role="vision", max_tokens=300
+            image_message(FRAME_PROMPT.format(t=ts(f.t)), jpeg), role=role, max_tokens=300
         ).strip()
     return frames
 
@@ -125,13 +127,14 @@ def read_keyframes(
     scene_threshold: float = 0.3,
     every: float = 30,
     max_frames: int = 60,
+    role: str = "vision",
 ) -> list[Keyframe]:
     duration = _probe_duration(video)
     times = pick_times(scene_times(video, scene_threshold), duration, every)
     if len(times) > max_frames:  # very cutty video: keep an even spread
         step = len(times) / max_frames
         times = [times[int(i * step)] for i in range(max_frames)]
-    frames = caption_frames(gateway, extract_frames(video, times, out_dir / "frames"))
+    frames = caption_frames(gateway, extract_frames(video, times, out_dir / "frames"), role)
     (out_dir / "frames.json").write_text(
         json.dumps([f.model_dump() for f in frames], ensure_ascii=False, indent=1),
         encoding="utf-8",

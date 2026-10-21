@@ -71,6 +71,7 @@ def task_citations(
                 verification_status=src.verification_status,
                 text=task_row_text(t, owner),
                 kind="task",
+                local_only=src.local_only,
             )
         )
     return cites

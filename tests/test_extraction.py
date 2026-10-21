@@ -101,6 +101,9 @@ def test_fields_depend_on_source():
 
 
 class FakeGateway:
+    def role_for(self, role, local_only=False):  # fakes are local
+        return role
+
     def __init__(self, payload):
         self.payload = payload
         self.calls = []

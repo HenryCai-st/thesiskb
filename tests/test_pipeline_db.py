@@ -56,6 +56,9 @@ PARSED = ParsedDocument(
 class FakeGateway:
     """Texts mentioning 'score' point along axis 0, everything else along axis 1."""
 
+    def role_for(self, role, local_only=False):  # fakes are local
+        return role
+
     def embed(self, texts, role="embedding"):
         out = []
         for t in texts:

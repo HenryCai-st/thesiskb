@@ -1,0 +1,77 @@
+# "API mode": answers, checks and extraction by a cloud LLM; the knowledge base, embeddings,
+# vision, speech and reranking stay local.
+#
+# Use it with   TKB_MODELS_FILE=examples/models.api.yaml   in .env
+# and put the provider key in .env too, e.g.   ANTHROPIC_API_KEY=sk-ant-...
+# (`tkb doctor` checks both). Any LiteLLM provider works: openai/gpt-..., gemini/..., etc.
+#
+# PRIVACY: in this mode the retrieved passages of every question are sent to the provider.
+# Mark sources that must never leave the machine with `tkb local-only <file>` (or ingest them
+# with --local-only); their content then goes to the `<role>_local` model instead, and if a
+# role has no local fallback the request is refused (BUILD_GUIDE §10).
+
+roles:
+  answer:
+    model: anthropic/claude-sonnet-5-5
+    params:
+      temperature: 0.2
+      max_tokens: 4096
+  answer_local:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params: {temperature: 0.2, num_ctx: 12288, max_tokens: 4096}
+
+  judge:
+    model: anthropic/claude-haiku-5-5
+    params: {temperature: 0.0, max_tokens: 1024}
+  judge_local:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params: {temperature: 0.0, num_ctx: 12288, max_tokens: 2048, reasoning_effort: none}
+
+  router:
+    model: anthropic/claude-haiku-5-5
+    params: {temperature: 0.0, max_tokens: 800}
+  router_local:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params: {temperature: 0.0, num_ctx: 8192, max_tokens: 800, reasoning_effort: none}
+
+  extraction:
+    model: anthropic/claude-haiku-5-5
+    params: {temperature: 0.0, max_tokens: 3000}
+  extraction_local:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params: {temperature: 0.0, num_ctx: 8192, max_tokens: 3000, reasoning_effort: none}
+
+  # Kept local on purpose:
+  # - vision: finding the upright rotation of photos uses token logprobs, which most cloud
+  #   vision APIs don't return (without them photos are read as stored, often sideways)
+  vision:
+    model: openai/qwen2.5vl:7b
+    api_base: "{ollama_base_url}/v1"
+    api_key: ollama
+    vram_gb: 7
+    params: {temperature: 0.0}
+  # - embedding: the stored vectors were made with this model; changing it means re-embedding
+  #   every chunk (`tkb ingest --force`), and cloud embeddings would send every chunk out
+  embedding:
+    model: ollama/bge-m3
+    vram_gb: 1.5
+    dim: 1024
+  reranker:
+    backend: cross_encoder
+    model: BAAI/bge-reranker-v2-m3
+    vram_gb: 1.2
+    fp16: true
+    max_length: 1024
+  asr:
+    backend: faster_whisper
+    model: large-v3-turbo
+    compute_type: float16
+    vram_gb: 4
+  diarization:
+    backend: pyannote
+    model: pyannote/speaker-diarization-community-1
+    vram_gb: 1.5

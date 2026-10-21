@@ -1,0 +1,84 @@
+# Model per role. `model` uses LiteLLM naming: "<provider>/<model>".
+# Local: ollama_chat/... (chat) and ollama/... (embeddings). Cloud: e.g. openai/gpt-..., anthropic/claude-...
+# `api_base` defaults to TKB_OLLAMA_BASE_URL for ollama* providers.
+# `vram_gb` is an approximate budget used by `tkb doctor` and (later) the GPU scheduler.
+# Pinned 2026-10 for a 16 GB GPU — revisit when better models appear (BUILD_GUIDE §11.1).
+
+roles:
+  answer:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12  # weights ~9.3 GB + KV cache for num_ctx
+    params:
+      temperature: 0.2
+      num_ctx: 12288   # 8 chunks × ≤800 tokens + prompt + answer (Ollama's default is too small)
+      max_tokens: 4096 # qwen3 "thinks" first; thinking tokens count here
+
+  judge:
+    # Citation-support checker (answer/verify.py). Same weights as `answer`, so no extra VRAM;
+    # thinking off: it only has to return JSON, and thinking used up the token budget.
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params:
+      temperature: 0.0
+      num_ctx: 12288
+      max_tokens: 2048
+      reasoning_effort: none
+
+  router:
+    # Question classification, sub-queries and evidence summaries: short JSON outputs, so
+    # thinking off. Same weights as `answer` (no extra VRAM).
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params:
+      temperature: 0.0
+      num_ctx: 8192
+      max_tokens: 800
+      reasoning_effort: none
+
+  extraction:
+    # Structured output (JSON schema) per chunk; thinking off — it doubles latency and the
+    # evidence-quote check catches hallucinated items anyway.
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params:
+      temperature: 0.0
+      num_ctx: 8192
+      max_tokens: 3000
+      reasoning_effort: none
+
+  vision:
+    # Served by Ollama's OpenAI-compatible endpoint: unlike LiteLLM's ollama_chat provider it
+    # returns token logprobs, which ingest/images.py uses to find the upright rotation.
+    model: openai/qwen2.5vl:7b
+    api_base: "{ollama_base_url}/v1"
+    api_key: ollama  # placeholder; Ollama ignores it
+    vram_gb: 7
+    params:
+      temperature: 0.0
+
+  embedding:
+    model: ollama/bge-m3
+    vram_gb: 1.5
+    dim: 1024
+
+  reranker:
+    # "cross_encoder" runs locally via sentence-transformers (install extra: `uv sync --extra local`).
+    # "litellm" uses litellm.rerank() (Cohere, Jina, ... in API mode).
+    backend: cross_encoder
+    model: BAAI/bge-reranker-v2-m3
+    vram_gb: 1.2
+    fp16: true
+    max_length: 1024
+
+  asr:
+    # Not called through LiteLLM; used by ingest/audio.py.
+    backend: faster_whisper
+    model: large-v3-turbo
+    compute_type: float16
+    vram_gb: 4
+
+  diarization:
+    # pyannote pipeline (gated on Hugging Face: needs TKB_HF_TOKEN and accepted terms).
+    backend: pyannote
+    model: pyannote/speaker-diarization-community-1
+    vram_gb: 1.5

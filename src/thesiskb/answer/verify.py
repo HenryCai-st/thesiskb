@@ -71,7 +71,7 @@ def judge_support(gateway: LLMGateway, ans: Answer) -> None:
         try:
             raw = gateway.chat(
                 [{"role": "user", "content": prompt}],
-                role="judge",
+                role=gateway.role_for("judge", any(by_n[n].local_only for n in s.citations)),
                 response_format={"type": "json_object"},
             )
             j = _Judgement.model_validate(json.loads(_strip_fences(raw)))

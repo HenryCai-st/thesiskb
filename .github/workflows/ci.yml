@@ -4,9 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+env:
+  # tests create and use thesiskb_test on this server
+  TKB_DATABASE_URL: postgresql+psycopg://thesiskb:thesiskb@localhost:5432/thesiskb
 
 jobs:
   test:
+    name: lint + unit tests (models mocked)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -19,9 +25,6 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U thesiskb" --health-interval 5s
           --health-timeout 3s --health-retries 20
-    env:
-      # tests create and use thesiskb_test on this server
-      TKB_DATABASE_URL: postgresql+psycopg://thesiskb:thesiskb@localhost:5432/thesiskb
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -29,3 +32,33 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -v
+
+  integration:
+    name: integration (1-page PDF + 10 s speech, real parsers on CPU)
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: thesiskb
+          POSTGRES_PASSWORD: thesiskb
+          POSTGRES_DB: thesiskb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U thesiskb" --health-interval 5s
+          --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg espeak-ng
+      - name: Install base + CPU-only ML stack (not the CUDA wheels from the lock file)
+        run: |
+          uv sync --locked
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          uv pip install docling faster-whisper
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-docling-whisper-tiny-v1
+      - run: uv run --no-sync pytest -m integration -v

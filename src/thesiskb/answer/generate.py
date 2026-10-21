@@ -52,6 +52,7 @@ class Citation(BaseModel):
     kind: str = "chunk"  # chunk | task | statement
     summary: str | None = None  # literature path: question-focused evidence summary
     score: float | None = None
+    local_only: bool = False  # from a source that must never reach a cloud model
 
 
 SentenceStatus = Literal[
@@ -100,6 +101,9 @@ def locator_label(loc: dict[str, Any]) -> str:
         return f"p. {p}" if not e or e == p else f"pp. {p}–{e}"
     if loc.get("t_start") is not None:
         return f"{_ts(loc['t_start'])}–{_ts(loc.get('t_end') or loc['t_start'])}"
+    if loc.get("line") is not None:
+        a, z = loc["line"], loc.get("line_end") or loc["line"]
+        return f"line {a}" if a == z else f"lines {a}–{z}"
     if loc.get("image"):
         parts = ["image"]
         if loc.get("regions"):
@@ -301,6 +305,7 @@ def hit_citations(hits: list[Hit], start: int = 1) -> list[Citation]:
             verification_status=h.verification_status,
             text=h.text,
             score=h.score,
+            local_only=h.local_only,
         )
         for i, h in enumerate(hits, start=start)
     ]
@@ -322,7 +327,7 @@ def generate_from(
     user = f"Context:\n\n{format_context(cites)}\n\nQuestion: {question}"
     raw = gateway.chat(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        role="answer",
+        role=gateway.role_for("answer", any(c.local_only for c in cites)),
     ).strip()
     refused = REFUSAL.rstrip(".").lower() in raw.lower()
     sentences = split_answer(raw)

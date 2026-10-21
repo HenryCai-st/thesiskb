@@ -17,11 +17,13 @@ import hashlib
 import json
 import logging
 import re
+from abc import ABC, abstractmethod
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, create_model
 from sqlalchemy import any_, delete, func, select
 from sqlalchemy.orm import Session
 
@@ -124,13 +126,74 @@ FIELD_DOCS = {
 }
 
 
+# --- plug-in extractors ---------------------------------------------------------------------
+
+
+class Extractor(ABC):
+    """An extra extraction schema (BUILD_GUIDE §8 "Extractor per schema").
+
+    Its field is added to the same per-chunk LLM call as the built-ins (no extra calls), items
+    with an `evidence_quote` not found verbatim in the chunk are dropped, and `write` stores the
+    rest — it is called once per source with every chunk's items and should replace what it
+    stored for that source before. Example: a "claims" extractor writing to its own table, or
+    to a JSON file under data/processed/<sha>/.
+
+        class Claims(Extractor):
+            key = "claims"
+            doc = '"claims": factual claims with numbers: {claim, value, evidence_quote}'
+            item = Claim  # pydantic model with an evidence_quote field
+
+            def applies(self, src): return src.source_type == "paper"
+            def write(self, session, src, items): ...
+
+        register_extractor(Claims())
+    """
+
+    key: str = ""
+    doc: str = ""
+    item: type[BaseModel]
+    needs_evidence: bool = True
+
+    def applies(self, src: Source) -> bool:
+        return True
+
+    @abstractmethod
+    def write(self, session: Session, src: Source, items: list[tuple[Chunk, list]]) -> int:
+        """Store the verified items; return how many were stored."""
+
+
+_EXTRACTORS: dict[str, Extractor] = {}
+
+
+def register_extractor(ex: Extractor) -> Extractor:
+    if ex.key in Extraction.model_fields:
+        raise ValueError(f"'{ex.key}' is a built-in extraction field")
+    _EXTRACTORS[ex.key] = ex
+    _model_for.cache_clear()
+    return ex
+
+
+@lru_cache
+def _model_for(plugin_keys: tuple[str, ...]) -> type[Extraction]:
+    if not plugin_keys:
+        return Extraction
+    extra = {k: (list[_EXTRACTORS[k].item], Field(default_factory=list)) for k in plugin_keys}
+    return create_model("ExtractionWithPlugins", __base__=Extraction, **extra)
+
+
+def extraction_model(fields: list[str]) -> type[Extraction]:
+    """The response schema for these fields: built-ins + any plug-in extractors among them."""
+    return _model_for(tuple(f for f in fields if f in _EXTRACTORS))
+
+
 def fields_for(src: Source) -> list[str]:
     fields = []
     if (src.source_type or "") in TASK_SOURCES:
         fields.append("tasks")
     if src.modality in STATEMENT_MODALITIES:
         fields.append("statements")
-    return [*fields, "entities", "relations"]
+    plugins = [k for k, ex in _EXTRACTORS.items() if ex.applies(src)]
+    return [*fields, "entities", "relations", *plugins]
 
 
 def _norm(s: str) -> str:
@@ -148,41 +211,37 @@ def _cache_key(chunk: Chunk, fields: list[str]) -> str:
     return hashlib.sha1(("|".join(fields) + "\n" + chunk.text).encode()).hexdigest()
 
 
-def extract_chunk(gateway: LLMGateway, chunk: Chunk, fields: list[str]) -> Extraction:
+def extract_chunk(
+    gateway: LLMGateway, chunk: Chunk, fields: list[str], role: str = "extraction"
+) -> Extraction:
     prompt = PROMPT.format(
         header=chunk.context_header or "",
-        fields="\n".join(FIELD_DOCS[f] for f in fields),
+        fields="\n".join(FIELD_DOCS.get(f) or _EXTRACTORS[f].doc for f in fields),
         text=chunk.text,
     )
-    raw = gateway.chat(
-        [{"role": "user", "content": prompt}], role="extraction", response_format=Extraction
-    )
+    model = extraction_model(fields)
+    raw = gateway.chat([{"role": "user", "content": prompt}], role=role, response_format=model)
     try:
-        out = Extraction.model_validate(json.loads(raw))
+        out = model.model_validate(json.loads(raw))
     except (ValidationError, ValueError) as e:
         log.warning("unparsable extraction for chunk %s: %s", chunk.id, e)
-        return Extraction()
-    for f in set(Extraction.model_fields) - set(fields):
+        return model()
+    for f in set(model.model_fields) - set(fields):
         setattr(out, f, [])
     return out
 
 
 def verified(x: Extraction, text: str) -> tuple[Extraction, int]:
     """Drop items whose evidence quote is not in the chunk. Returns (kept, n_dropped)."""
-    kept = Extraction(
-        tasks=[t for t in x.tasks if quote_in(t.evidence_quote, text)],
-        statements=[s for s in x.statements if quote_in(s.evidence_quote, text)],
-        entities=x.entities,
-        relations=[r for r in x.relations if quote_in(r.evidence_quote, text)],
-    )
-    dropped = (
-        len(x.tasks)
-        - len(kept.tasks)
-        + len(x.statements)
-        - len(kept.statements)
-        + len(x.relations)
-        - len(kept.relations)
-    )
+    checked = ["tasks", "statements", "relations"] + [
+        k for k, ex in _EXTRACTORS.items() if ex.needs_evidence and k in type(x).model_fields
+    ]
+    update = {
+        k: [i for i in getattr(x, k) if quote_in(getattr(i, "evidence_quote", "") or "", text)]
+        for k in checked
+    }
+    kept = x.model_copy(update=update)
+    dropped = sum(len(getattr(x, k)) - len(update[k]) for k in checked)
     return kept, dropped
 
 
@@ -221,6 +280,7 @@ class ExtractReport(BaseModel):
     entities: int = 0
     relations: int = 0
     dropped_no_evidence: int = 0
+    plugins: dict[str, int] = Field(default_factory=dict)  # plug-in key → rows stored
 
 
 def extract_source(
@@ -242,9 +302,9 @@ def extract_source(
     for i, c in enumerate(chunks, 1):
         key = _cache_key(c, fields)
         if key in cache:
-            x = Extraction.model_validate(cache[key])
+            x = extraction_model(fields).model_validate(cache[key])
         else:
-            x = extract_chunk(gateway, c, fields)
+            x = extract_chunk(gateway, c, fields, gateway.role_for("extraction", src.local_only))
             cache[key] = x.model_dump()
             rep.llm_calls += 1
             # save after every call: an interrupted run on a long paper resumes where it stopped
@@ -256,6 +316,10 @@ def extract_source(
         results.append((c, x))
 
     _write(session, src, results, reference_date or _source_date(src), rep)
+    for k in fields:
+        if k in _EXTRACTORS:
+            stored = _EXTRACTORS[k].write(session, src, [(c, getattr(x, k)) for c, x in results])
+            rep.plugins[k] = stored
     return rep
 
 

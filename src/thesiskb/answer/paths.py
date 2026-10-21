@@ -112,7 +112,9 @@ def evidence_summary(gateway: LLMGateway, question: str, c: Citation) -> _Summar
     )
     try:
         raw = gateway.chat(
-            [{"role": "user", "content": prompt}], role="router", response_format=_Summary
+            [{"role": "user", "content": prompt}],
+            role=gateway.role_for("router", c.local_only),
+            response_format=_Summary,
         )
         return _Summary.model_validate(json.loads(raw))
     except (ValidationError, ValueError):
@@ -208,6 +210,7 @@ def statement_citations(session: Session, person: Person, start: int = 1) -> lis
                 verification_status=src.verification_status,
                 text=f"Statement by {person.name} on {st.topic}: {st.stance}\n{line}",
                 kind="statement",
+                local_only=src.local_only,
             )
         )
     return cites
@@ -264,6 +267,7 @@ def entity_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
                 verification_status=src.verification_status,
                 text=f"Entities:\n{listing}\n\n{chunk.text}",
                 kind="entity",
+                local_only=src.local_only,
             )
         )
     return Ctx(cites=cites, rules=ENTITY_RULES, timings={"graph": time.perf_counter() - t0})

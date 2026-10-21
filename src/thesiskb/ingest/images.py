@@ -103,13 +103,13 @@ def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else -math.inf
 
 
-def find_rotation(gateway: LLMGateway, im) -> tuple[int, dict[int, float]]:
+def find_rotation(gateway: LLMGateway, im, role: str = "vision") -> tuple[int, dict[int, float]]:
     """Rotation (ccw degrees) whose short transcription the VLM is most confident about."""
     scores: dict[int, float] = {}
     for angle in ROTATIONS:
         rotated = im.rotate(angle, expand=True) if angle else im
         _, lps = gateway.chat_with_logprobs(
-            image_message(TRANSCRIBE_PROMPT, _jpeg(rotated)), role="vision", max_tokens=48
+            image_message(TRANSCRIBE_PROMPT, _jpeg(rotated)), role=role, max_tokens=48
         )
         scores[angle] = round(_mean(lps), 4)
     if all(math.isinf(s) for s in scores.values()):
@@ -171,25 +171,26 @@ def read_image(
     languages: list[str],
     tesseract_cmd: str = "tesseract",
     tessdata: str | None = None,
+    role: str = "vision",
 ) -> ImageReading:
     from PIL import Image, ImageOps
 
     with Image.open(src) as raw:
         im = ImageOps.exif_transpose(raw).convert("RGB")
-    rotation, scores = find_rotation(gateway, im)
+    rotation, scores = find_rotation(gateway, im, role)
     upright = im.rotate(rotation, expand=True) if rotation else im
     out_dir.mkdir(parents=True, exist_ok=True)
     upright_path = out_dir / "upright.jpg"
     upright.save(upright_path, "JPEG", quality=92)
 
     transcription, lps = gateway.chat_with_logprobs(
-        image_message(TRANSCRIBE_PROMPT, _jpeg(upright)), role="vision", max_tokens=1024
+        image_message(TRANSCRIBE_PROMPT, _jpeg(upright)), role=role, max_tokens=1024
     )
     transcription = transcription.strip()
 
     raw = gateway.chat(
         image_message(DESCRIBE_PROMPT.format(transcription=transcription), _jpeg(upright)),
-        role="vision",
+        role=role,
         response_format={"type": "json_object"},
         max_tokens=1024,
     )

@@ -20,11 +20,31 @@ class RerankResult(BaseModel):
     score: float
 
 
+class LocalOnlyError(RuntimeError):
+    """Content of a local_only source would have gone to a non-local model."""
+
+
 class LLMGateway:
     def __init__(self, models: ModelsConfig, ollama_base_url: str) -> None:
         self.models = models
         self.ollama_base_url = ollama_base_url
         self._cross_encoders: dict[str, Any] = {}
+
+    def role_for(self, role: str, local_only: bool) -> str:
+        """The role to use for content that may include local_only sources (BUILD_GUIDE §10).
+
+        In API mode `answer` may be a cloud model; content from a local_only source must then
+        go to `<role>_local` (e.g. `answer_local` on Ollama). Without one, refuse rather than
+        send it."""
+        if not local_only or self.models.role(role).is_local:
+            return role
+        alt = f"{role}_local"
+        if alt in self.models.roles and self.models.role(alt).is_local:
+            return alt
+        raise LocalOnlyError(
+            f"a local_only source needs a local model for role '{role}': add a local "
+            f"'{alt}' role to models.yaml (see config/examples/models.api.yaml)"
+        )
 
     def _call_kwargs(self, role: RoleConfig) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"model": role.model}
@@ -90,39 +110,25 @@ class LLMGateway:
         if not documents:
             return []
         cfg = self.models.role(role)
-        if cfg.backend == "cross_encoder":
-            scores = self._cross_encoder(cfg).predict(
-                [(query, d) for d in documents], batch_size=16
-            )
-            results = [RerankResult(index=i, score=float(s)) for i, s in enumerate(scores)]
-        elif cfg.backend == "litellm":
+        if cfg.backend == "litellm":  # Cohere, Jina, ... in API mode
             resp = litellm.rerank(query=query, documents=documents, **self._call_kwargs(cfg))
             results = [
                 RerankResult(index=r["index"], score=float(r["relevance_score"]))
                 for r in resp.results
             ]
-        else:
-            raise ValueError(f"Unknown reranker backend '{cfg.backend}'")
+        else:  # a registered backend (llm/backends.py), e.g. the local cross_encoder
+            scores = self._reranker(cfg).predict([(query, d) for d in documents], batch_size=16)
+            results = [RerankResult(index=i, score=float(s)) for i, s in enumerate(scores)]
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_n] if top_n else results
 
-    def _cross_encoder(self, cfg: RoleConfig) -> Any:
-        if cfg.model not in self._cross_encoders:
-            try:
-                import torch
-                from sentence_transformers import CrossEncoder
-            except ImportError as e:
-                raise RuntimeError(
-                    "Reranker backend 'cross_encoder' needs: uv sync --extra local"
-                ) from e
-            extra = cfg.model_extra or {}
-            kwargs: dict[str, Any] = {"max_length": extra.get("max_length", 1024)}
-            if extra.get("fp16", True) and torch.cuda.is_available():
-                # fp16 halves VRAM (~1.1 GB) so it fits next to the answer LLM without
-                # spilling into shared system memory, which is ~20x slower on Windows
-                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
-            self._cross_encoders[cfg.model] = CrossEncoder(cfg.model, **kwargs)
-        return self._cross_encoders[cfg.model]
+    def _reranker(self, cfg: RoleConfig) -> Any:
+        key = f"{cfg.backend}:{cfg.model}"
+        if key not in self._cross_encoders:  # loaded once per process
+            from thesiskb.llm.backends import create_backend
+
+            self._cross_encoders[key] = create_backend("reranker", cfg, get_settings())
+        return self._cross_encoders[key]
 
 
 def image_message(prompt: str, jpeg: bytes) -> list[Message]:

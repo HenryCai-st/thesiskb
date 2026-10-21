@@ -85,6 +85,9 @@ def ingest(
     extract: bool = typer.Option(
         True, help="Run LLM extraction (tasks, statements, entities); slow on long papers"
     ),
+    local_only: bool = typer.Option(
+        False, "--local-only", help="Never send these files' content to a cloud model"
+    ),
 ) -> None:
     """Ingest documents (PDF/Office), images, audio and video."""
     import logging
@@ -92,23 +95,24 @@ def ingest(
 
     from thesiskb.core.db import session_scope
     from thesiskb.ingest.detect import detect
-    from thesiskb.ingest.pipeline import SUPPORTED_MODALITIES
     from thesiskb.ingest.pipeline import ingest as run_ingest
+    from thesiskb.ingest.pipeline import supported_modalities
     from thesiskb.llm import get_gateway
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     for noisy in ("LiteLLM", "httpx", "docling", "transformers"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = get_pipeline_config()
+    modalities = supported_modalities(cfg)  # loads plug-ins (new file types) before detect
     files = detect(paths)
-    supported = [f for f in files if f.modality in SUPPORTED_MODALITIES]
+    supported = [f for f in files if f.modality in modalities]
     by_kind = Counter(f.modality for f in supported)
     console.print(
         f"Found {len(files)} files: " + ", ".join(f"{n} {m}" for m, n in sorted(by_kind.items()))
     )
     for f in files:
-        if f.modality not in SUPPORTED_MODALITIES:
-            console.print(f"  [dim]skip (needs a later milestone): {f.path.name} ({f.modality})[/]")
+        if f.modality not in modalities:
+            console.print(f"  [dim]skip (no parser for {f.modality}): {f.path.name}[/]")
 
     with session_scope() as session:
         report = run_ingest(
@@ -120,6 +124,7 @@ def ingest(
             force=force,
             metadata_lookup=bool((cfg.model_extra or {}).get("metadata_lookup", True)),
             extract=extract,
+            local_only=local_only,
         )
     failed = report.pop("failed")
     work = ", ".join(f"{stage}: {n}" for stage, n in report.items())
@@ -531,6 +536,117 @@ def statements(
                 escape(where),
             )
     console.print(table)
+
+
+@app.command()
+def verify(
+    source: str = typer.Argument(..., help="sha256 prefix or part of filename"),
+    status: str = typer.Option("verified", help="verified | disputed | unverified"),
+    by: str | None = typer.Option(None, "--by", help="Who checked it (shown with citations)"),
+) -> None:
+    """Record that you checked a source. `tkb ask --verified-only` then uses only these."""
+    from datetime import UTC, datetime
+
+    from thesiskb.core.db import session_scope
+
+    if status not in ("verified", "disputed", "unverified"):
+        console.print("[red]--status must be verified, disputed or unverified[/]")
+        raise typer.Exit(code=1)
+    with session_scope() as session:
+        src = _resolve_source(session, source)
+        src.verification_status = status
+        src.verified_by = by if status != "unverified" else None
+        src.verified_at = datetime.now(UTC) if status != "unverified" else None
+        name = src.path.rsplit("/", 1)[-1]
+    console.print(f"{escape(name)}: {status}" + (f" by {escape(by)}" if by else ""))
+
+
+@app.command("local-only")
+def local_only_cmd(
+    source: str = typer.Argument(..., help="sha256 prefix or part of filename"),
+    off: bool = typer.Option(False, "--off", help="Allow cloud models again"),
+) -> None:
+    """Keep a source's content away from cloud models (API mode); local fallbacks are used."""
+    from thesiskb.core.db import session_scope
+
+    with session_scope() as session:
+        src = _resolve_source(session, source)
+        src.local_only = not off
+        name = src.path.rsplit("/", 1)[-1]
+    state = "may be sent to cloud models" if off else "local models only"
+    console.print(f"{escape(name)}: {state}")
+
+
+@app.command("forget-person")
+def forget_person(
+    name: str = typer.Argument(..., help="Name or alias"),
+    delete_recordings: bool = typer.Option(
+        False, help="Also remove every recording they speak in from the index"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Don't ask for confirmation"),
+) -> None:
+    """Delete a person's data (BUILD_GUIDE §10): statements, speaker labels, profile; their
+    name is removed from transcripts by re-indexing. Original files are never deleted."""
+    import shutil
+
+    from sqlalchemy import delete, select, update
+
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Source, Speaker, Statement, Task
+    from thesiskb.ingest.extract import resolve_person
+    from thesiskb.ingest.pipeline import processed_dir, rechunk
+    from thesiskb.llm import get_gateway
+
+    cfg = get_pipeline_config()
+    with session_scope() as session:
+        p = resolve_person(session, name)
+        if p is None:
+            console.print(f"[red]No person '{escape(name)}'[/]")
+            raise typer.Exit(code=1)
+        source_ids = list(
+            session.scalars(select(Speaker.source_id).where(Speaker.person_id == p.id).distinct())
+        )
+        sources = [session.get(Source, i) for i in source_ids]
+        n_st = len(session.scalars(select(Statement.id).where(Statement.person_id == p.id)).all())
+        console.print(
+            f"[bold]{escape(p.name)}[/]: {n_st} statements, speaker in {len(sources)} "
+            f"recording(s): " + ", ".join(escape(s.path.rsplit("/", 1)[-1]) for s in sources)
+        )
+        if delete_recordings:
+            console.print(
+                "[yellow]--delete-recordings: those recordings leave the index "
+                "(their processed files are deleted; your originals are kept)[/]"
+            )
+        if not yes and not typer.confirm("Delete this person's data?"):
+            raise typer.Exit(code=1)
+
+        session.execute(delete(Statement).where(Statement.person_id == p.id))
+        session.execute(
+            update(Task).where(Task.owner_person_id == p.id).values(owner_person_id=None)
+        )
+        session.execute(update(Speaker).where(Speaker.person_id == p.id).values(person_id=None))
+        session.delete(p)
+        session.commit()
+
+        gateway = get_gateway()
+        for src in sources:
+            label = src.path.rsplit("/", 1)[-1]
+            if delete_recordings:
+                shutil.rmtree(processed_dir(cfg, src.sha256), ignore_errors=True)
+                session.delete(src)
+                session.commit()
+                console.print(
+                    f"  removed from index: {escape(label)} (original: {escape(src.path)})"
+                )
+            else:
+                # chunks/extractions are rebuilt with the anonymous label (SPEAKER_03)
+                (processed_dir(cfg, src.sha256) / "extract.json").unlink(missing_ok=True)
+                rechunk(session, src, cfg, gateway)
+                console.print(f"  re-indexed without the name: {escape(label)}")
+    console.print(
+        "[green]done[/] — the voice itself is still in those recordings; use "
+        "--delete-recordings (and delete the originals) to remove it entirely."
+    )
 
 
 @app.command()

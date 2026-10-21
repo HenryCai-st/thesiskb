@@ -17,6 +17,9 @@ NOTE = "10.10.2026 - Proposal\nNov - Start thesis\nJan 2027 - mid term presentat
 
 
 class FakeLLM:
+    def role_for(self, role, local_only=False):  # fakes are local
+        return role
+
     def __init__(self, payload):
         self.payload = payload
         self.calls = 0

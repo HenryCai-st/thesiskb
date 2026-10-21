@@ -1,0 +1,37 @@
+# Small / CPU-friendly setup: laptops without an NVIDIA GPU, or a quick first try.
+# Use with   TKB_MODELS_FILE=examples/models.cpu.yaml   (and `ollama pull` the models below).
+# Expect slower, weaker answers than with qwen3:14b; the pipeline and citations work the same.
+
+roles:
+  answer:
+    model: ollama_chat/qwen3:4b
+    params: {temperature: 0.2, num_ctx: 8192, max_tokens: 3000}
+  judge:
+    model: ollama_chat/qwen3:4b
+    params: {temperature: 0.0, num_ctx: 8192, max_tokens: 1024, reasoning_effort: none}
+  router:
+    model: ollama_chat/qwen3:4b
+    params: {temperature: 0.0, num_ctx: 4096, max_tokens: 600, reasoning_effort: none}
+  extraction:
+    model: ollama_chat/qwen3:4b
+    params: {temperature: 0.0, num_ctx: 8192, max_tokens: 2000, reasoning_effort: none}
+  vision:
+    model: openai/qwen2.5vl:3b
+    api_base: "{ollama_base_url}/v1"
+    api_key: ollama
+    params: {temperature: 0.0}
+  embedding:
+    model: ollama/bge-m3
+    dim: 1024
+  reranker:
+    backend: cross_encoder
+    model: BAAI/bge-reranker-v2-m3
+    fp16: false
+    max_length: 512
+  asr:
+    backend: faster_whisper
+    model: small            # whisper "small": ~10x faster than large-v3-turbo on CPU
+    compute_type: int8
+  diarization:
+    backend: none           # one speaker per recording; switch to pyannote when you can
+    model: "-"

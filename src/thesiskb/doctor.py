@@ -166,6 +166,44 @@ def check_tesseract(
     )
 
 
+PROVIDER_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def check_cloud(models: ModelsConfig) -> CheckResult:
+    """Which roles leave the machine, and whether their provider key is set (never shown)."""
+    import os
+
+    cloud = {name: r for name, r in models.roles.items() if not r.is_local}
+    if not cloud:
+        return CheckResult(name="Cloud", status=Status.OK, detail="none — fully local")
+    missing = sorted(
+        {
+            PROVIDER_KEYS[r.provider]
+            for r in cloud.values()
+            if r.provider in PROVIDER_KEYS and not os.environ.get(PROVIDER_KEYS[r.provider])
+        }
+    )
+    no_fallback = sorted(n for n in cloud if f"{n}_local" not in models.roles)
+    detail = f"cloud roles: {', '.join(sorted(cloud))}"
+    if no_fallback:
+        detail += f"; no local fallback (local_only sources refused) for: {', '.join(no_fallback)}"
+    if missing:
+        return CheckResult(
+            name="Cloud",
+            status=Status.FAIL,
+            detail=f"{detail}; missing in .env: {', '.join(missing)}",
+        )
+    return CheckResult(name="Cloud", status=Status.OK, detail=detail + "; keys set")
+
+
 def run_checks(
     settings: Settings, models: ModelsConfig, ocr_languages: list[str]
 ) -> list[CheckResult]:
@@ -173,6 +211,7 @@ def run_checks(
         check_db(settings.database_url),
         check_gpu(),
         check_ollama(settings.ollama_base_url, models),
+        check_cloud(models),
         check_binary("ffmpeg", ["-version"]),
         check_tesseract(ocr_languages, settings.tesseract_cmd, settings.tessdata_dir),
     ]

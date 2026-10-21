@@ -144,6 +144,9 @@ def test_read_keyframes_captions_each_frame(monkeypatch, tmp_path):
     monkeypatch.setattr(video, "extract_frames", fake_extract)
 
     class FakeVLM:
+        def role_for(self, role, local_only=False):  # fakes are local
+            return role
+
         def chat(self, messages, role="vision", **kw):
             assert role == "vision"
             return "Jetson board on a table. Text: $249"

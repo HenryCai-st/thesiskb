@@ -91,6 +91,14 @@ def merge_locators(locators: list[dict[str, Any]]) -> dict[str, Any]:
     if starts:
         out["t_start"] = min(starts)
         out["t_end"] = max(ends) if ends else None
+    lines = [loc["line"] for loc in locators if loc.get("line") is not None]
+    if lines:  # plain-text sources (plug-in parsers)
+        out["line"] = min(lines)
+        out["line_end"] = max(
+            locator.get("line_end") or locator["line"]
+            for locator in locators
+            if locator.get("line") is not None
+        )
     speakers = sorted({loc["speaker"] for loc in locators if loc.get("speaker")})
     if speakers:
         out["speakers"] = speakers

@@ -87,7 +87,9 @@ def default_source_type(f: DetectedFile) -> str | None:
     return {"image": "note", "audio": "meeting", "video": "demo"}.get(f.modality)
 
 
-def register(session: Session, f: DetectedFile, source_type: str | None = None) -> Source:
+def register(
+    session: Session, f: DetectedFile, source_type: str | None = None, local_only: bool = False
+) -> Source:
     """Insert or refresh the `sources` row for a file. Returns the (possibly existing) row."""
     src = session.scalar(select(Source).where(Source.sha256 == f.sha256))
     path = f.path.as_posix()
@@ -98,6 +100,7 @@ def register(session: Session, f: DetectedFile, source_type: str | None = None) 
             modality=f.modality,
             source_type=source_type or default_source_type(f),
             title=f.path.stem,
+            local_only=local_only,
         )
         session.add(src)
         session.flush()
@@ -106,4 +109,6 @@ def register(session: Session, f: DetectedFile, source_type: str | None = None) 
             src.path = path  # file was moved or renamed; content is unchanged
         if source_type:
             src.source_type = source_type
+        if local_only:
+            src.local_only = True  # only ever tightened here; `tkb local-only --off` relaxes
     return src

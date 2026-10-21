@@ -30,15 +30,19 @@ from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
 from thesiskb.ingest.documents import FTS_CONFIG, detect_language, extract_blocks
 from thesiskb.ingest.metadata import arxiv_id_from_name, lookup_arxiv
+from thesiskb.ingest.parsers import (
+    ParseContext,
+    Parser,
+    load_plugins,
+    parser_for,
+    register_parser,
+)
+from thesiskb.ingest.parsers import supported_modalities as registered_modalities
 from thesiskb.llm.gateway import LLMGateway
 
 log = logging.getLogger(__name__)
 
 STAGES = ("parse", "chunk", "embed", "extract")
-SUPPORTED_MODALITIES = DOCUMENT_MODALITIES | {"image", "audio", "video"}
-# parse = model outputs only; turns are built from them in the (cheap) chunk stage.
-# video: frames.json is written last, after diarization.json
-PARSE_OUTPUT = {"image": "image.json", "audio": "diarization.json", "video": "frames.json"}
 EMBED_BATCH = 16
 
 
@@ -47,7 +51,14 @@ def processed_dir(cfg: PipelineConfig, sha256: str) -> Path:
 
 
 def parse_output(cfg: PipelineConfig, src: Source) -> Path:
-    return processed_dir(cfg, src.sha256) / PARSE_OUTPUT.get(src.modality, "docling.json")
+    parser = parser_for(src.modality)
+    return processed_dir(cfg, src.sha256) / (parser.output_for(src) if parser else "")
+
+
+def supported_modalities(cfg: PipelineConfig | None = None) -> set[str]:
+    """Modalities some parser handles, after loading plug-ins listed in pipeline.yaml."""
+    load_plugins(((cfg.model_extra or {}).get("plugins") if cfg else None) or [])
+    return registered_modalities()
 
 
 def job_done(session: Session, source: Source, stage: str) -> bool:
@@ -99,16 +110,22 @@ def ingest(
     force: bool = False,
     metadata_lookup: bool = True,
     extract: bool = True,
+    local_only: bool = False,
 ) -> IngestReport:
     report = IngestReport({s: 0 for s in STAGES})
     report["failed"] = []
+    modalities = supported_modalities(cfg)
     sources = [
-        (register(session, f, source_type), f) for f in files if f.modality in SUPPORTED_MODALITIES
+        (register(session, f, source_type, local_only), f)
+        for f in files
+        if f.modality in modalities
     ]
     session.commit()
+    ctx = _context(session, cfg, gateway, report, force, metadata_lookup)
 
-    # --- parse: one GPU batch per modality ---
-    todo: dict[str, list[tuple[Source, DetectedFile]]] = {"document": [], "image": [], "av": []}
+    # --- parse: one batch per parser, so each GPU model family is loaded once ---
+    todo: dict[str, list[tuple[Source, DetectedFile]]] = {}
+    parsers: dict[str, Parser] = {}
     for s, f in sources:
         if force:
             pass
@@ -117,25 +134,18 @@ def ingest(
         elif parse_output(cfg, s).exists():
             run_stage(session, s, "parse", lambda: None)  # output cached on disk; no GPU work
             continue
-        group = {"image": "image", "audio": "av", "video": "av"}.get(s.modality, "document")
-        todo[group].append((s, f))
-
-    if todo["document"]:
-        _parse_documents(session, todo["document"], cfg, report)
-    if todo["image"]:
-        _parse_images(session, todo["image"], cfg, gateway, report)
-    if todo["av"]:
-        _parse_av(session, todo["av"], cfg, gateway, report, force)
+        parser = parser_for(s.modality)
+        parsers[parser.name] = parser
+        todo.setdefault(parser.name, []).append((s, f))
+    for name, items in todo.items():
+        parsers[name].parse(ctx, items)
 
     # --- chunk (CPU) ---
     count = get_token_counter()
     for src, f in sources:
         if not job_done(session, src, "parse"):
             continue
-        chunker = {"image": _chunk_image, "audio": _chunk_av, "video": _chunk_av}.get(
-            src.modality, _chunk_document
-        )
-        work = partial(chunker, session, src, f, cfg, count, metadata_lookup)
+        work = partial(parser_for(src.modality).chunk, ctx, src, f, count)
         if _safe(report, session, src, f, "chunk", work, force):
             report["chunk"] += 1
             # new chunks invalidate old embeddings and extractions
@@ -163,6 +173,25 @@ def ingest(
     return report
 
 
+def _context(session, cfg, gateway, report, force=False, metadata_lookup=True) -> ParseContext:
+    """ParseContext whose mark() records each file's parse stage in jobs (and the report)."""
+
+    def mark(src, f, fn) -> bool:
+        if _safe(report, session, src, f, "parse", fn, force=True):
+            report["parse"] = report.get("parse", 0) + 1
+            return True
+        return False
+
+    return ParseContext(
+        session=session,
+        cfg=cfg,
+        gateway=gateway,
+        force=force,
+        metadata_lookup=metadata_lookup,
+        mark=mark,
+    )
+
+
 def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway) -> None:
     from thesiskb.ingest.extract import extract_source
 
@@ -181,60 +210,59 @@ def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway)
     )
 
 
-def _parse_documents(session, todo, cfg: PipelineConfig, report: IngestReport) -> None:
+def _parse_documents(ctx: ParseContext, todo) -> None:
     from thesiskb.ingest.documents import DoclingConverter
     from thesiskb.llm.ollama import unload_all
 
     unload_all(get_settings().ollama_base_url)
-    converter = DoclingConverter(do_ocr=bool((cfg.model_extra or {}).get("pdf_ocr", False)))
+    converter = DoclingConverter(do_ocr=bool(ctx.options.get("pdf_ocr", False)))
     try:
         for src, f in todo:
             log.info("parse %s", f.path.name)
-            work = partial(converter.convert, f.path, parse_output(cfg, src))
-            if _safe(report, session, src, f, "parse", work, force=True):
-                report["parse"] += 1
+            ctx.mark(src, f, partial(converter.convert, f.path, parse_output(ctx.cfg, src)))
     finally:
         converter.close()
 
 
-def _parse_images(session, todo, cfg, gateway: LLMGateway, report: IngestReport) -> None:
+def _parse_images(ctx: ParseContext, todo) -> None:
     from thesiskb.ingest.images import read_image
     from thesiskb.llm.ollama import unload_all
 
     settings = get_settings()
     unload_all(settings.ollama_base_url)  # free VRAM for the vision model
-    langs = (cfg.model_extra or {}).get("ocr", {}).get("languages", ["eng"])
+    langs = ctx.options.get("ocr", {}).get("languages", ["eng"])
     try:
         for src, f in todo:
             log.info("read image %s", f.path.name)
             work = partial(
                 read_image,
-                gateway,
+                ctx.gateway,
                 f.path,
-                processed_dir(cfg, src.sha256),
+                ctx.out_dir(src),
                 langs,
                 settings.tesseract_cmd,
                 settings.tessdata_dir,
+                ctx.gateway.role_for("vision", src.local_only),
             )
-            if _safe(report, session, src, f, "parse", work, force=True):
-                report["parse"] += 1
+            ctx.mark(src, f, work)
     finally:
         unload_all(settings.ollama_base_url)  # don't leave the VLM next to the answer LLM
 
 
-def _parse_av(session, todo, cfg, gateway: LLMGateway, report: IngestReport, force: bool):
+def _parse_av(ctx: ParseContext, todo) -> None:
     """Audio/video parse as model batches: Whisper → pyannote → (video) VLM keyframes.
 
     Each step's output is cached in data/processed/<sha>/, so a re-run resumes where it failed.
     """
     from thesiskb.ingest import audio, video
+    from thesiskb.llm.backends import create_backend
     from thesiskb.llm.ollama import unload_all
 
     settings = get_settings()
     models = get_models_config()
-    extra = cfg.model_extra or {}
+    extra, force, gateway = ctx.options, ctx.force, ctx.gateway
     failed: dict[str, str] = {}
-    dirs = {src.sha256: processed_dir(cfg, src.sha256) for src, _ in todo}
+    dirs = {src.sha256: ctx.out_dir(src) for src, _ in todo}
 
     def step(name: str, items, fn) -> None:
         for src, f in items:
@@ -259,9 +287,7 @@ def _parse_av(session, todo, cfg, gateway: LLMGateway, report: IngestReport, for
     if items := need("asr.json"):
         asr_cfg = models.role("asr")
         log.info("transcribe %d file(s) with %s", len(items), asr_cfg.model)
-        tr = audio.Transcriber(
-            asr_cfg.model, (asr_cfg.model_extra or {}).get("compute_type", "float16")
-        )
+        tr = create_backend("asr", asr_cfg, settings)
         try:
             step(
                 "transcribe", items, lambda s, f, d: tr.transcribe(d / "audio.wav", d / "asr.json")
@@ -271,7 +297,7 @@ def _parse_av(session, todo, cfg, gateway: LLMGateway, report: IngestReport, for
     if items := need("diarization.json"):
         log.info("diarize %d file(s)", len(items))
         try:
-            dia = audio.Diarizer(models.role("diarization").model, settings.hf_token)
+            dia = create_backend("diarization", models.role("diarization"), settings)
         except Exception as e:  # noqa: BLE001 — e.g. missing token: every file fails the same
             for s, _ in items:
                 failed.setdefault(s.sha256, f"diarize: {type(e).__name__}: {e}")
@@ -298,6 +324,7 @@ def _parse_av(session, todo, cfg, gateway: LLMGateway, report: IngestReport, for
                     d,
                     scene_threshold=vcfg.get("scene_threshold", 0.3),
                     every=vcfg.get("keyframe_fallback_seconds", 30),
+                    role=gateway.role_for("vision", s.local_only),
                 ),
             )
         finally:
@@ -310,8 +337,7 @@ def _parse_av(session, todo, cfg, gateway: LLMGateway, report: IngestReport, for
             if err:
                 raise RuntimeError(err)
 
-        if _safe(report, session, src, f, "parse", done, force=True):
-            report["parse"] += 1
+        ctx.mark(src, f, done)
 
 
 def _safe(
@@ -354,21 +380,15 @@ def _add_chunks(
     src.ingested_at = _now()
 
 
-def _chunk_document(
-    session: Session,
-    src: Source,
-    f: DetectedFile,
-    cfg: PipelineConfig,
-    count,
-    metadata_lookup: bool,
-) -> None:
+def _chunk_document(ctx: ParseContext, src: Source, f: DetectedFile, count) -> None:
+    session, cfg = ctx.session, ctx.cfg
     out_dir = processed_dir(cfg, src.sha256)
     parsed = extract_blocks(out_dir / "docling.json")
     sample = " ".join(b.text for b in parsed.blocks[:80])
     lang = detect_language(sample)
 
     meta = None
-    if metadata_lookup and (aid := arxiv_id_from_name(f.path.name)):
+    if ctx.metadata_lookup and (aid := arxiv_id_from_name(f.path.name)):
         meta = lookup_arxiv(aid)
     src.title = (meta.title if meta else None) or parsed.title or src.title
     if meta:
@@ -403,14 +423,8 @@ def _chunk_document(
     )
 
 
-def _chunk_image(
-    session: Session,
-    src: Source,
-    f: DetectedFile,
-    cfg: PipelineConfig,
-    count,
-    metadata_lookup: bool,
-) -> None:
+def _chunk_image(ctx: ParseContext, src: Source, f: DetectedFile, count) -> None:
+    session, cfg = ctx.session, ctx.cfg
     from thesiskb.ingest.images import ImageReading, image_blocks
 
     reading = ImageReading.model_validate_json(
@@ -433,6 +447,26 @@ def _chunk_image(
     _add_chunks(session, src, drafts, FTS_CONFIG.get(lang, "simple"), lambda d: all_ids)
 
 
+def write_blocks(ctx: ParseContext, src: Source, blocks, count, language: str | None = None):
+    """Generic chunk stage for plug-in parsers: one segment per block, section-aware chunks.
+
+    `blocks` are `ingest.chunking.Block`s with a locator each (e.g. {"line": 12}). Returns the
+    number of chunks written."""
+    lang = language or detect_language(" ".join(b.text for b in blocks[:80]))
+    src.language = lang
+    src.pipeline_version = ctx.cfg.pipeline_version
+    _replace_rows(ctx.session, src)
+    segments = [
+        Segment(source_id=src.id, kind=b.kind, text=b.text, locator=b.locator) for b in blocks
+    ]
+    ctx.session.add_all(segments)
+    ctx.session.flush()
+    ids = [s.id for s in segments]
+    drafts = chunk_blocks(blocks, ctx.cfg.chunking, _short_title(src), count)
+    _add_chunks(ctx.session, src, drafts, FTS_CONFIG.get(lang, "simple"), lambda d: ids)
+    return len(drafts)
+
+
 def speaker_names(session: Session, src: Source) -> dict[str, str]:
     """diarization label → person name, for labels mapped with `tkb speakers label`."""
     rows = session.execute(
@@ -443,14 +477,8 @@ def speaker_names(session: Session, src: Source) -> dict[str, str]:
     return dict(rows)
 
 
-def _chunk_av(
-    session: Session,
-    src: Source,
-    f: DetectedFile,
-    cfg: PipelineConfig,
-    count,
-    metadata_lookup: bool,
-) -> None:
+def _chunk_av(ctx: ParseContext, src: Source, f: DetectedFile, count) -> None:
+    session, cfg = ctx.session, ctx.cfg
     from thesiskb.ingest.audio import build_transcript, transcript_blocks
     from thesiskb.ingest.video import Keyframe, frame_blocks
 
@@ -520,14 +548,12 @@ def _chunk_av(
 def rechunk(session: Session, src: Source, cfg: PipelineConfig, gateway: LLMGateway) -> None:
     """Redo chunk + embed for one source (e.g. after speaker labels changed)."""
     f = DetectedFile(path=Path(src.path), sha256=src.sha256, modality=src.modality)
-    chunker = {"image": _chunk_image, "audio": _chunk_av, "video": _chunk_av}.get(
-        src.modality, _chunk_document
-    )
+    ctx = ParseContext(session=session, cfg=cfg, gateway=gateway, metadata_lookup=False)
     run_stage(
         session,
         src,
         "chunk",
-        partial(chunker, session, src, f, cfg, get_token_counter(), False),
+        partial(parser_for(src.modality).chunk, ctx, src, f, get_token_counter()),
         force=True,
     )
     run_stage(session, src, "embed", partial(_embed_source, session, src, gateway), force=True)
@@ -552,7 +578,9 @@ def _embed_source(session: Session, src: Source, gateway: LLMGateway) -> None:
     ).all()
     for i in range(0, len(chunks), EMBED_BATCH):
         batch = chunks[i : i + EMBED_BATCH]
-        vectors = gateway.embed([embedding_text(c) for c in batch])
+        vectors = gateway.embed(
+            [embedding_text(c) for c in batch], role=gateway.role_for("embedding", src.local_only)
+        )
         for c, v in zip(batch, vectors, strict=True):
             c.embedding = v
     session.flush()
@@ -570,3 +598,52 @@ def _embed_source(session: Session, src: Source, gateway: LLMGateway) -> None:
 
 def embedding_text(c: Chunk) -> str:
     return f"{c.context_header}\n\n{c.text}" if c.context_header else c.text
+
+
+# --- built-in parsers ------------------------------------------------------------------------
+
+
+class DocumentParser(Parser):
+    name = "documents"
+    modalities = frozenset(DOCUMENT_MODALITIES)
+    output = "docling.json"
+
+    def parse(self, ctx, items):
+        _parse_documents(ctx, items)
+
+    def chunk(self, ctx, src, f, count):
+        _chunk_document(ctx, src, f, count)
+
+
+class ImageParser(Parser):
+    name = "images"
+    modalities = frozenset({"image"})
+    output = "image.json"
+
+    def parse(self, ctx, items):
+        _parse_images(ctx, items)
+
+    def chunk(self, ctx, src, f, count):
+        _chunk_image(ctx, src, f, count)
+
+
+class AudioVideoParser(Parser):
+    """One parser for both, so Whisper and pyannote each load once for all recordings."""
+
+    name = "audio_video"
+    modalities = frozenset({"audio", "video"})
+
+    def output_for(self, src):
+        # parse = model outputs only; turns are built from them in the (cheap) chunk stage.
+        # video: frames.json is written last, after diarization.json
+        return "frames.json" if src.modality == "video" else "diarization.json"
+
+    def parse(self, ctx, items):
+        _parse_av(ctx, items)
+
+    def chunk(self, ctx, src, f, count):
+        _chunk_av(ctx, src, f, count)
+
+
+for _parser in (DocumentParser(), ImageParser(), AudioVideoParser()):
+    register_parser(_parser)

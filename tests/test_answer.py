@@ -64,6 +64,9 @@ def test_check_citations_flags():
 
 
 class FakeGateway:
+    def role_for(self, role, local_only=False):  # fakes are local
+        return role
+
     def __init__(self, *replies):
         self.replies = list(replies)
         self.calls = []

@@ -80,7 +80,7 @@ def test_rerank_cross_encoder_sorted(gateway):
         def predict(self, pairs, batch_size=32):
             return [0.1, 0.9, 0.5]
 
-    gateway._cross_encoders["BAAI/bge-reranker-v2-m3"] = FakeCE()
+    gateway._cross_encoders["cross_encoder:BAAI/bge-reranker-v2-m3"] = FakeCE()
     out = gateway.rerank("q", ["a", "b", "c"], top_n=2)
     assert [r.index for r in out] == [1, 2]
 
@@ -95,3 +95,19 @@ def test_rerank_litellm_backend(gateway, monkeypatch):
         ),
     )
     assert [r.index for r in gateway.rerank("q", ["a", "b"])] == [1, 0]
+
+
+def test_role_for_keeps_local_only_content_local(models):
+    from thesiskb.core.config import RoleConfig
+
+    gw_ = gw.LLMGateway(models, "http://ollama:11434")
+    assert gw_.role_for("answer", True) == "answer"  # Ollama is local
+    gw_.models.roles["answer"] = RoleConfig(model="anthropic/claude-sonnet-5-5")
+    assert gw_.role_for("answer", False) == "answer"
+    with pytest.raises(gw.LocalOnlyError, match="answer_local"):
+        gw_.role_for("answer", True)
+    gw_.models.roles["answer_local"] = RoleConfig(model="ollama_chat/qwen3:14b")
+    assert gw_.role_for("answer", True) == "answer_local"
+    # an OpenAI-compatible server on localhost counts as local
+    gw_.models.roles["answer"] = RoleConfig(model="openai/x", api_base="http://localhost:8001/v1")
+    assert gw_.role_for("answer", True) == "answer"

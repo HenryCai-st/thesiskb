@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     tesseract_cmd: str = "tesseract"
     tessdata_dir: str | None = None  # language packs folder if not the install default
     config_dir: Path = REPO_ROOT / "config"
+    # which model setup to use, relative to config_dir: models.yaml (fully local, default) or
+    # e.g. examples/models.api.yaml (cloud LLM, local KB)
+    models_file: str = "models.yaml"
 
 
 class RoleConfig(BaseModel):
@@ -50,6 +53,14 @@ class RoleConfig(BaseModel):
     @property
     def served_by_ollama(self) -> bool:
         return self.provider.startswith("ollama") or "{ollama_base_url}" in (self.api_base or "")
+
+    @property
+    def is_local(self) -> bool:
+        """Runs on this machine: Ollama, a localhost endpoint, or an in-process backend."""
+        if self.backend != "litellm" or self.served_by_ollama:
+            return True
+        base = (self.api_base or "").lower()
+        return any(h in base for h in ("://localhost", "://127.0.0.1", "://[::1]"))
 
 
 class ModelsConfig(BaseModel):
@@ -105,13 +116,23 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 @lru_cache
 def get_settings() -> Settings:
+    # also export .env to the process environment: LiteLLM reads provider keys
+    # (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...) from there, not from Settings
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(".env", override=False)
+    except ImportError:
+        pass
     return Settings()
 
 
 @lru_cache
 def get_models_config(config_dir: Path | None = None) -> ModelsConfig:
-    d = config_dir or get_settings().config_dir
-    return ModelsConfig.model_validate(_load_yaml(d / "models.yaml"))
+    settings = get_settings()
+    d = config_dir or settings.config_dir
+    path = Path(settings.models_file)
+    return ModelsConfig.model_validate(_load_yaml(path if path.is_absolute() else d / path))
 
 
 @lru_cache

@@ -22,6 +22,9 @@ from thesiskb.ingest.images import (
 class FakeVLM:
     """Confident only when the image is landscape (our 'upright' in this test)."""
 
+    def role_for(self, role, local_only=False):  # fakes are local
+        return role
+
     def __init__(self, description):
         self.description = description
         self.calls = 0
