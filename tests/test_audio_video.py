@@ -174,3 +174,8 @@ def test_long_monologue_split_at_sentence_ends():
     assert len(turns) == 3
     assert all(t.end - t.start <= 22 for t in turns)
     assert turns[1].start == 22.0  # first sentence end after 20 s
+
+
+def test_zero_length_word_inside_turn_gets_its_speaker():
+    words = assign_speakers(_words((3.0, 3.0, "a")), [{"start": 0, "end": 9, "speaker": "S0"}])
+    assert words[0].speaker == "S0"

@@ -182,8 +182,9 @@ def assign_speakers(
             if overlap > best_overlap:
                 best, best_overlap = t["speaker"], overlap
             elif best_overlap == 0.0:
-                gap = max(t["start"] - w.end, w.start - t["end"])
-                if 0 <= gap < best_gap:
+                # 0 for a zero-length word inside the turn (Whisper sometimes gives start == end)
+                gap = max(0.0, t["start"] - w.end, w.start - t["end"])
+                if gap < best_gap:
                     best, best_gap = t["speaker"], gap
         w.speaker = best
     return words
