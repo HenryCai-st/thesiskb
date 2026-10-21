@@ -1,0 +1,80 @@
+# Gold questions for `tkb eval` (BUILD_GUIDE §8). Milestone 0 fixture set.
+#
+# expected_sources: original filenames under data/raw/ (the eval resolves them to sources by sha256).
+# type:   literature | person | task | comparison | general
+# path:   which router path should answer it (Milestone 6); lists mean multi-path.
+# expected_facts: short facts a correct answer must contain (checked by an LLM judge).
+# expected_tasks: for task questions, rows the extraction must produce (recall is measured on these).
+# TODO(user): fill expected_facts for the video/audio once you have re-watched them.
+
+fixtures:
+  survey: 2209.00796v15.pdf                      # Yang et al., "Diffusion Models: A Comprehensive Survey..." (59 p.)
+  schedule: 5389068047127093167.jpg              # handwritten thesis timeline, photo rotated 90°
+  jetson_video: YTDown.com_YouTube_Media_S9L2WGf1KrM_Introducing-NVIDIA-Jetson-Orin-Nano-Super-The-World-s-Most-Affordable-Generative_001_1080p.mp4
+  dgx_audio: "Sparking Something Big_ NVIDIA DGX Spark Has Arrived.mp3"
+
+questions:
+  # --- Literature (Q1 type) ---
+  - id: lit-01
+    question: How is diffusion model developing?
+    type: literature
+    path: literature
+    expected_sources: [survey]
+    expected_facts:
+      - Three foundational formulations - DDPMs, score-based generative models (SGMs), score SDEs
+      - Improvement directions - efficient sampling, improved likelihood, special data structures
+      - Applications across vision, NLP, multimodal, temporal data, science
+    notes: Broad synthesis; answer must say it only covers what is in the KB.
+
+  - id: lit-02
+    question: What methods does the survey list for making diffusion sampling faster?
+    type: literature
+    path: literature
+    expected_sources: [survey]
+    expected_facts:
+      - Learning-free sampling (SDE/ODE solvers) and learning-based sampling (e.g. distillation)
+
+  # --- Cross-modal comparison (video + audio) ---
+  - id: cmp-01
+    question: What is the difference between Nano and DGX Spark?
+    type: comparison
+    path: [general]
+    expected_sources: [jetson_video, dgx_audio]
+    expected_facts: []   # TODO(user): e.g. target use, compute, memory, price as stated in the recordings
+    notes: >
+      The video is about the Jetson *Orin Nano Super*, not the original Jetson Nano.
+      Citations must carry timestamps from both recordings.
+
+  # --- Task / schedule (Q3 type: SQL over extracted tasks, not free generation) ---
+  - id: task-01
+    question: Show me the schedule of my thesis
+    type: task
+    path: task
+    expected_sources: [schedule]
+    expected_tasks:
+      - {description: Thesis proposal, due_raw: "10.10.2026", due_date: 2026-10-10}
+      - {description: Start thesis (weekly meeting with supervisor), due_raw: "Nov", due_date: 2026-11-30}
+      - {description: Mid-term presentation, due_raw: "Jan 2027", due_date: 2027-01-31}
+      - {description: Final, due_raw: "March", due_date: 2027-03-31}
+      - {description: Submission, due_raw: "05.2027", due_date: 2027-05-31}
+    notes: >
+      Month-only dates resolve to end of month; year inferred from neighbouring entries.
+      Owner is the user (thesis author). Tests OCR/VLM on handwriting and a rotated photo.
+
+  - id: task-02
+    question: When is my mid-term presentation?
+    type: task
+    path: task
+    expected_sources: [schedule]
+    expected_facts: [January 2027]
+
+  # --- Audience / general question answered from one recording ---
+  - id: gen-01
+    question: What kind of people (should) like to use DGX Spark?
+    type: general
+    path: [general]
+    expected_sources: [dgx_audio]
+    expected_facts: []   # TODO(user): target users as described in the audio
+    notes: >
+      Not a Q2 "person" question (that is about what a specific named person says/prefers).
+      Answer should quote the audio with timestamps.
