@@ -7,9 +7,22 @@
 roles:
   answer:
     model: ollama_chat/qwen3:14b
-    vram_gb: 10
+    vram_gb: 12  # weights ~9.3 GB + KV cache for num_ctx
     params:
       temperature: 0.2
+      num_ctx: 12288   # 8 chunks × ≤800 tokens + prompt + answer (Ollama's default is too small)
+      max_tokens: 4096 # qwen3 "thinks" first; thinking tokens count here
+
+  judge:
+    # Citation-support checker (answer/verify.py). Same weights as `answer`, so no extra VRAM;
+    # thinking off: it only has to return JSON, and thinking used up the token budget.
+    model: ollama_chat/qwen3:14b
+    vram_gb: 12
+    params:
+      temperature: 0.0
+      num_ctx: 12288
+      max_tokens: 2048
+      reasoning_effort: none
 
   extraction:
     model: ollama_chat/qwen3:14b
@@ -31,7 +44,9 @@ roles:
     # "litellm" uses litellm.rerank() (Cohere, Jina, ... in API mode).
     backend: cross_encoder
     model: BAAI/bge-reranker-v2-m3
-    vram_gb: 1.5
+    vram_gb: 1.2
+    fp16: true
+    max_length: 1024
 
   asr:
     # Not called through LiteLLM; used by ingest/audio.py (Milestone 4).

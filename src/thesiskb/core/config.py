@@ -60,6 +60,7 @@ class RetrievalConfig(BaseModel):
     hybrid_top_k: int = 30
     rerank_top_k: int = 8
     rrf_k: int = 60
+    min_rerank_score: float = 0.02  # below this the answer path refuses instead of generating
 
 
 class PipelineConfig(BaseModel):

@@ -20,8 +20,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Local cross-encoder reranker (pulls torch; not needed for CI)
-local = ["sentence-transformers>=3.0"]
+# GPU/ML stack for real ingestion and reranking (pulls torch; not needed for CI)
+local = [
+    "docling>=2.40",
+    "sentence-transformers>=3.0",
+    "torch>=2.7",
+]
 
 [project.scripts]
 tkb = "thesiskb.cli:app"
@@ -32,6 +36,15 @@ dev = [
     "pytest>=8.2",
     "ruff>=0.6",
 ]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
@@ -47,6 +60,14 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.flake8-bugbear]
+# typer declares CLI options as default-argument calls
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.ruff.lint.per-file-ignores]
+# prompt templates are prose
+"src/thesiskb/answer/*.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

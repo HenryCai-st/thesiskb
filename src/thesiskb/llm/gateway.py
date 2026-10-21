@@ -12,6 +12,8 @@ from thesiskb.core.config import ModelsConfig, RoleConfig, get_models_config, ge
 
 Message = dict[str, Any]
 
+litellm.suppress_debug_info = True  # it prints a "Provider List" banner to stdout otherwise
+
 
 class RerankResult(BaseModel):
     index: int
@@ -70,7 +72,9 @@ class LLMGateway:
             return []
         cfg = self.models.role(role)
         if cfg.backend == "cross_encoder":
-            scores = self._cross_encoder(cfg.model).predict([(query, d) for d in documents])
+            scores = self._cross_encoder(cfg).predict(
+                [(query, d) for d in documents], batch_size=16
+            )
             results = [RerankResult(index=i, score=float(s)) for i, s in enumerate(scores)]
         elif cfg.backend == "litellm":
             resp = litellm.rerank(query=query, documents=documents, **self._call_kwargs(cfg))
@@ -83,16 +87,23 @@ class LLMGateway:
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_n] if top_n else results
 
-    def _cross_encoder(self, model: str) -> Any:
-        if model not in self._cross_encoders:
+    def _cross_encoder(self, cfg: RoleConfig) -> Any:
+        if cfg.model not in self._cross_encoders:
             try:
+                import torch
                 from sentence_transformers import CrossEncoder
             except ImportError as e:
                 raise RuntimeError(
                     "Reranker backend 'cross_encoder' needs: uv sync --extra local"
                 ) from e
-            self._cross_encoders[model] = CrossEncoder(model)
-        return self._cross_encoders[model]
+            extra = cfg.model_extra or {}
+            kwargs: dict[str, Any] = {"max_length": extra.get("max_length", 1024)}
+            if extra.get("fp16", True) and torch.cuda.is_available():
+                # fp16 halves VRAM (~1.1 GB) so it fits next to the answer LLM without
+                # spilling into shared system memory, which is ~20x slower on Windows
+                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+            self._cross_encoders[cfg.model] = CrossEncoder(cfg.model, **kwargs)
+        return self._cross_encoders[cfg.model]
 
 
 @lru_cache

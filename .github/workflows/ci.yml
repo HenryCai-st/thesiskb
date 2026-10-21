@@ -20,6 +20,7 @@ jobs:
           --health-cmd "pg_isready -U thesiskb" --health-interval 5s
           --health-timeout 3s --health-retries 20
     env:
+      # tests create and use thesiskb_test on this server
       TKB_DATABASE_URL: postgresql+psycopg://thesiskb:thesiskb@localhost:5432/thesiskb
     steps:
       - uses: actions/checkout@v4

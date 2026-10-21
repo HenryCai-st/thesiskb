@@ -4,7 +4,7 @@ from thesiskb.core.config import Settings, get_people_config, get_pipeline_confi
 
 
 def test_models_yaml_defines_all_roles(models):
-    for role in ("answer", "extraction", "vision", "embedding", "reranker", "asr"):
+    for role in ("answer", "judge", "extraction", "vision", "embedding", "reranker", "asr"):
         assert models.role(role).model
 
 

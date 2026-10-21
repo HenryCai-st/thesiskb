@@ -60,7 +60,7 @@ def test_embed_empty(gateway):
 
 def test_rerank_cross_encoder_sorted(gateway):
     class FakeCE:
-        def predict(self, pairs):
+        def predict(self, pairs, batch_size=32):
             return [0.1, 0.9, 0.5]
 
     gateway._cross_encoders["BAAI/bge-reranker-v2-m3"] = FakeCE()

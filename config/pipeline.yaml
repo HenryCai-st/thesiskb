@@ -23,3 +23,9 @@ retrieval:
   hybrid_top_k: 30
   rerank_top_k: 8
   rrf_k: 60
+  min_rerank_score: 0.02
+
+# Born-digital PDFs don't need OCR; turn on for scans.
+pdf_ocr: false
+# Look up title/authors/date for arXiv papers (only the arXiv id is sent).
+metadata_lookup: true

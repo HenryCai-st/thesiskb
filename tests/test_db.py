@@ -1,40 +1,30 @@
-"""Migration test against a real Postgres+pgvector. Skipped unless the DB is reachable."""
+"""Migration test against a real Postgres+pgvector (the *_test database only)."""
 
-import os
 import uuid
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 
-URL = os.environ.get("TKB_DATABASE_URL")
+from tests.conftest import TEST_DB_URL, requires_db
 
-pytestmark = pytest.mark.db
-
-
-def _reachable(url: str | None) -> bool:
-    if not url:
-        return False
-    try:
-        with create_engine(url, connect_args={"connect_timeout": 2}).connect():
-            return True
-    except Exception:  # noqa: BLE001
-        return False
+pytestmark = [pytest.mark.db, requires_db]
 
 
-@pytest.mark.skipif(not _reachable(URL), reason="TKB_DATABASE_URL not set or unreachable")
-def test_migrations_create_schema_and_roundtrip():
+def test_migrations_create_schema_and_roundtrip(db_url):
     from alembic import command
     from alembic.config import Config
 
     from thesiskb.core.config import REPO_ROOT
 
+    assert make_url(TEST_DB_URL).database.endswith("_test")  # never wipe a real KB
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "src/thesiskb/migrations"))
-    cfg.set_main_option("sqlalchemy.url", URL)
+    cfg.set_main_option("sqlalchemy.url", db_url)
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
-    engine = create_engine(URL)
+    engine = create_engine(db_url)
     tables = set(inspect(engine).get_table_names())
     expected = {
         "sources",
@@ -69,3 +59,4 @@ def test_migrations_create_schema_and_roundtrip():
         ).scalar()
         assert hit == 1
         conn.execute(text("DELETE FROM sources WHERE id = :id"), {"id": sid})
+    engine.dispose()

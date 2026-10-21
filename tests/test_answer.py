@@ -1,0 +1,118 @@
+import json
+import uuid
+
+from thesiskb.answer.generate import (
+    Answer,
+    Citation,
+    format_context,
+    locator_label,
+    split_answer,
+    to_chunk_ids,
+)
+from thesiskb.answer.verify import check_citations, judge_support
+from thesiskb.retrieval.hybrid import Hit, fts_query_terms, rrf_fuse
+
+
+def _cite(n, text="passage text"):
+    return Citation(
+        n=n,
+        chunk_id=uuid.uuid4(),
+        filename="paper.pdf",
+        title="T",
+        context_header="Paper: T › 1 Intro",
+        locator={"page": n},
+        verification_status="unverified",
+        text=text,
+    )
+
+
+def test_split_keeps_citations_and_abbreviations():
+    s = split_answer(
+        "Diffusion is popular [S1]. Watson et al. [317] optimise steps [S2][S3].\n"
+        "- **Learning-free** includes:\n- DDIM [S1, S4]."
+    )
+    assert [x.citations for x in s] == [[1], [2, 3], [], [1, 4]]
+    assert "et al. [317]" in s[1].text  # not split at "al.", paper ref not a citation
+    assert s[2].status == "structural"
+
+
+def test_dangling_citation_joins_previous_sentence():
+    s = split_answer("Claim one.\n[S2]")
+    assert len(s) == 1 and s[0].citations == [2]
+
+
+def test_to_chunk_ids_and_invalid():
+    cites = [_cite(1)]
+    out = to_chunk_ids("A [S1]. B [S9].", cites)
+    assert f"[chunk:{cites[0].chunk_id}]" in out and "[invalid:S9]" in out
+
+
+def test_check_citations_flags():
+    ans = Answer(question="q", text="", context=[_cite(1), _cite(2)])
+    ans.sentences = split_answer("Good [S1]. Bad [S7]. Missing citation.")
+    check_citations(ans)
+    assert [s.status for s in ans.sentences] == ["unchecked", "invalid_citation", "uncited"]
+
+
+class FakeGateway:
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def chat(self, messages, role="answer", **kw):
+        self.calls.append((role, messages))
+        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+
+
+def test_judge_marks_unsupported_one_call_per_claim():
+    ans = Answer(question="q", text="", context=[_cite(1, "alpha"), _cite(2, "beta")])
+    ans.sentences = split_answer("True claim [S1]. Made-up claim [S2].")
+    gw = FakeGateway(
+        json.dumps({"supported": True}), json.dumps({"supported": False, "reason": "x"})
+    )
+    judge_support(gw, ans)
+    assert [s.status for s in ans.sentences] == ["supported", "unsupported"]
+    assert [role for role, _ in gw.calls] == ["judge", "judge"]
+    # each call only sees the passages its claim cites
+    assert "alpha" in gw.calls[0][1][0]["content"] and "beta" not in gw.calls[0][1][0]["content"]
+
+
+def test_judge_garbage_leaves_unchecked():
+    ans = Answer(question="q", text="", context=[_cite(1)])
+    ans.sentences = split_answer("Claim [S1].")
+    judge_support(FakeGateway("not json"), ans)
+    assert ans.sentences[0].status == "unchecked"
+
+
+def test_format_context_and_locators():
+    ctx = format_context([_cite(1, "hello")])
+    assert ctx.startswith("[S1] paper.pdf, p. 1 | Paper: T › 1 Intro\nhello")
+    assert locator_label({"page": 3, "page_end": 5}) == "pp. 3–5"
+    assert locator_label({"t_start": 65, "t_end": 130}) == "1:05–2:10"
+
+
+def _hit(i):
+    return Hit(
+        chunk_id=uuid.UUID(int=i),
+        source_id=uuid.UUID(int=0),
+        text=f"t{i}",
+        context_header=None,
+        locator={"page": 1},
+        source_path="/x/a.pdf",
+        source_title=None,
+        source_type="paper",
+        verification_status="unverified",
+    )
+
+
+def test_rrf_prefers_items_in_both_lists():
+    fused = rrf_fuse({"vector": [_hit(1), _hit(2)], "fts": [_hit(3), _hit(2)]}, k=60)
+    assert fused[0].chunk_id == uuid.UUID(int=2)
+    assert fused[0].ranks == {"vector": 2, "fts": 2}
+
+
+def test_fts_query_terms():
+    assert fts_query_terms("How is diffusion model developing?") == (
+        "how | is | diffusion | model | developing"
+    )
+    assert fts_query_terms("?!") == ""
