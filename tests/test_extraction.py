@@ -126,3 +126,32 @@ def test_extract_chunk_uses_schema_and_drops_unrequested_fields():
 
 def test_extract_chunk_garbage_is_empty():
     assert extract_chunk(FakeGateway("no json"), Chunk(text="x"), ["tasks"]) == Extraction()
+
+
+def test_month_only_detection():
+    from thesiskb.ingest.dates import is_month_only
+
+    assert all(is_month_only(r) for r in ["Nov", "Jan 2027", "05.2027", "März"])
+    assert not any(is_month_only(r) for r in ["10.10.2026", "2027-01-15", "3 March 2027", None])
+
+
+def test_task_row_shows_month_not_invented_day():
+    from thesiskb.answer.tasks import task_row_text
+    from thesiskb.core.models import Task
+
+    t = Task(
+        description="Mid-term",
+        due_date=date(2027, 1, 31),
+        due_raw="Jan 2027",
+        status="open",
+        confirmed=False,
+    )
+    assert "due January 2027 (written: Jan 2027)" in task_row_text(t, None)
+    t2 = Task(
+        description="Proposal",
+        due_date=date(2026, 10, 10),
+        due_raw="10.10.2026",
+        status="open",
+        confirmed=False,
+    )
+    assert "due 10 October 2026" in task_row_text(t2, None)

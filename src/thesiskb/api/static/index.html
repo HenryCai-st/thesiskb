@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThesisKB</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd;
+  --accent: #2f5bd3; --accent-soft: #e8eefc; --warn: #b4540a; --warn-soft: #fff1e3;
+  --bad: #b42318; --bad-soft: #fdecea; --ok: #1f7a4d; --mono: ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161616; --panel: #1f1f1e; --text: #ececea; --muted: #a3a29c; --line: #34332f;
+    --accent: #8fb0ff; --accent-soft: #24304d; --warn: #f0a35e; --warn-soft: #3a2a1a;
+    --bad: #ff8a80; --bad-soft: #3a1f1c; --ok: #6fd39c;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 24px; padding: 12px 20px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
+nav button { background: none; border: 0; padding: 6px 10px; font: inherit; color: var(--muted);
+  cursor: pointer; border-radius: 6px; }
+nav button.on { color: var(--text); background: var(--accent-soft); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr); gap: 16px;
+  padding: 16px 20px; max-width: 1500px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.hidden { display: none !important; }
+textarea { width: 100%; min-height: 64px; resize: vertical; font: inherit; color: var(--text);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+select, button.primary, button.small { font: inherit; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); padding: 6px 10px; cursor: pointer; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.primary:disabled { opacity: .5; cursor: wait; }
+.muted { color: var(--muted); font-size: 13px; }
+.answer p, .answer li { margin: 0 0 6px; }
+.sent { border-radius: 4px; }
+.sent.unsupported, .sent.invalid_citation { background: var(--bad-soft); }
+.sent.uncited { background: var(--warn-soft); }
+.flag { font-size: 12px; margin-left: 4px; color: var(--warn); }
+.sent.unsupported .flag, .sent.invalid_citation .flag { color: var(--bad); }
+.cite { display: inline-block; font: 12px var(--mono); padding: 0 5px; margin: 0 1px;
+  border-radius: 4px; background: var(--accent-soft); color: var(--accent); cursor: pointer;
+  border: 0; vertical-align: 1px; }
+.pin { display: block; font-size: 12.5px; color: var(--muted); margin: 2px 0 6px 18px; }
+.pin a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.pin img { height: 38px; vertical-align: middle; border-radius: 4px; margin-left: 6px;
+  border: 1px solid var(--line); }
+.sources { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+.src { padding: 6px 0; cursor: pointer; display: flex; gap: 8px; }
+.src:hover .name { text-decoration: underline; }
+.src .lab { font: 12px var(--mono); color: var(--accent); min-width: 30px; }
+.name { overflow-wrap: anywhere; }
+#viewer h3 { margin: 0 0 4px; font-size: 15px; overflow-wrap: anywhere; }
+#viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; }
+#viewer video, #viewer audio { width: 100%; margin: 8px 0; }
+.imgwrap { position: relative; display: inline-block; max-width: 100%; margin: 8px 0; }
+.imgwrap img { max-width: 100%; display: block; border-radius: 8px; }
+.region { position: absolute; border: 2px solid var(--accent); border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent); }
+pre.passage { white-space: pre-wrap; font: 13px/1.5 var(--mono); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 40vh; overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
+.tag { font-size: 12px; padding: 1px 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line);
+  border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ThesisKB</h1>
+  <nav>
+    <button data-tab="ask" class="on">Ask</button>
+    <button data-tab="tasks">Tasks</button>
+    <button data-tab="sources">Sources</button>
+  </nav>
+  <span class="muted" id="status"></span>
+</header>
+
+<main>
+  <section>
+    <div class="card" id="tab-ask">
+      <textarea id="q" placeholder="Ask your knowledge base… e.g. What did Will.i.am say about DGX Spark?"></textarea>
+      <div class="row">
+        <button class="primary" id="go">Ask</button>
+        <select id="path" title="Answer path">
+          <option value="auto">auto (router)</option><option>general</option>
+          <option>literature</option><option>person</option><option>task</option><option>entity</option>
+        </select>
+        <label class="muted"><input type="checkbox" id="verified"> verified sources only</label>
+        <span class="muted" id="timer"></span>
+      </div>
+      <div id="answer" class="answer" style="margin-top:14px"></div>
+    </div>
+
+    <div class="card hidden" id="tab-tasks">
+      <table><thead><tr><th>Due</th><th>Written</th><th>Task</th><th>Owner</th><th></th></tr></thead>
+        <tbody id="tasks"></tbody></table>
+    </div>
+
+    <div class="card hidden" id="tab-sources">
+      <table><thead><tr><th>File</th><th>Type</th><th>Chunks</th><th>Stages</th></tr></thead>
+        <tbody id="sources"></tbody></table>
+    </div>
+  </section>
+
+  <aside class="card" id="viewer">
+    <p class="muted">Click a citation to see the exact page, image region or moment in a recording.</p>
+  </aside>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let token = null;
+try { token = localStorage.getItem("tkb_token"); } catch (_) {}
+let current = null; // last answer
+
+async function api(path, opts = {}) {
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (token) headers.Authorization = "Bearer " + token;
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401) {
+    token = prompt("API token (TKB_API_TOKEN):");
+    try { localStorage.setItem("tkb_token", token); } catch (_) {}
+    return api(path, opts);
+  }
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  return r.json();
+}
+const withToken = (url) => token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) : url;
+const ts = (s) => { s = Math.floor(s); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, "0")}`; };
+
+// --- tabs ---
+document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
+  ["ask", "tasks", "sources"].forEach((t) => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+  if (b.dataset.tab === "tasks") loadTasks();
+  if (b.dataset.tab === "sources") loadSources();
+});
+
+// --- ask ---
+function inline(md) {  // tiny markdown: **bold**, [S1] chips, (m:ss) kept as text
+  return esc(md)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/\[(S\d+(?:\s*[,;]\s*S?\d+)*)\]/g, (_, g) =>
+      g.match(/\d+/g).map((n) => `<button class="cite" data-n="${n}">S${n}</button>`).join(""));
+}
+const FLAGS = { unsupported: "⚠ not supported by the cited source", uncited: "⚠ no citation",
+                invalid_citation: "⚠ cites a passage that was not shown" };
+
+function renderAnswer(a) {
+  current = a;
+  const out = [];
+  for (const s of a.sentences.length ? a.sentences : [{ text: a.text, status: "unchecked", pinpoints: [] }]) {
+    const bullet = /^\s*([-*•]|\d+[.)])\s+/.test(s.text);
+    const text = s.text.replace(/^\s*([-*•])\s+/, "");
+    const flag = FLAGS[s.status] ? `<span class="flag" title="${esc(s.note || "")}">${FLAGS[s.status]}</span>` : "";
+    out.push(`<p class="sent ${s.status}" ${bullet ? 'style="margin-left:14px"' : ""}>${bullet ? "• " : ""}${inline(text)}${flag}</p>`);
+    for (const p of s.pinpoints || []) {
+      const who = p.speaker ? esc(p.speaker) : "on screen";
+      const img = p.frame_url ? `<img src="${withToken(p.frame_url)}" alt="keyframe">` : "";
+      out.push(`<span class="pin">↳ <a data-n="${p.n}" data-t="${p.t}">▶ ${ts(p.t)} ${who}</a>${img}</span>`);
+    }
+  }
+  const used = new Set(a.sentences.flatMap((s) => s.citations));
+  const cited = a.context.filter((c) => used.has(c.n));
+  if (cited.length) {
+    out.push('<div class="sources"><div class="muted">Sources</div>');
+    for (const c of cited) {
+      out.push(`<div class="src" data-n="${c.n}"><span class="lab">S${c.n}</span>
+        <span><span class="name">${esc(c.filename)}</span> <span class="muted">${esc(where(c.locator))}
+        ${c.verification_status !== "unverified" ? " · " + esc(c.verification_status) : ""}</span></span></div>`);
+    }
+    out.push("</div>");
+  }
+  const r = a.route || {};
+  const t = Object.entries(a.timings || {}).map(([k, v]) => `${k} ${v.toFixed(1)}s`).join(" · ");
+  out.push(`<p class="muted" style="margin-top:10px">route: ${esc((r.paths || []).join(" + "))}${r.person ? " (" + esc(r.person) + ")" : ""} · ${esc(t)}</p>`);
+  $("#answer").innerHTML = out.join("");
+  $("#answer").querySelectorAll("[data-n]").forEach((el) =>
+    el.onclick = () => openCitation(+el.dataset.n, el.dataset.t ? +el.dataset.t : null));
+}
+
+function where(loc) {
+  if (loc.page != null) return loc.page_end && loc.page_end !== loc.page ? `pp. ${loc.page}–${loc.page_end}` : `p. ${loc.page}`;
+  if (loc.t_start != null) return `${ts(loc.t_start)}–${ts(loc.t_end ?? loc.t_start)}`;
+  if (loc.image) return "image";
+  return "";
+}
+
+$("#go").onclick = async () => {
+  const question = $("#q").value.trim();
+  if (!question) return;
+  $("#go").disabled = true;
+  const t0 = Date.now();
+  const tick = setInterval(() => $("#timer").innerHTML = `<span class="spinner"></span> ${((Date.now() - t0) / 1000).toFixed(0)} s — local models, usually 20–70 s`, 500);
+  $("#answer").innerHTML = "";
+  try {
+    const a = await api("/api/ask", { method: "POST", body: JSON.stringify({
+      question, path: $("#path").value, verified_only: $("#verified").checked }) });
+    renderAnswer(a);
+  } catch (e) { $("#answer").innerHTML = `<p class="sent unsupported">Error: ${esc(e.message)}</p>`; }
+  clearInterval(tick); $("#timer").textContent = ""; $("#go").disabled = false;
+};
+$("#q").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("#go").click(); });
+
+// --- viewer ---
+async function openCitation(n, t = null) {
+  const c = current.context.find((x) => x.n === n);
+  if (!c) return;
+  const chunk = await api(`/api/chunks/${c.chunk_id}`);
+  showChunk(chunk, t ?? c.locator.t_start, c.text);
+}
+
+function showChunk(chunk, t, passageText) {
+  const s = chunk.source, loc = chunk.locator || {};
+  const file = withToken(`/files/${s.id}`);
+  let media = "";
+  if (s.modality === "pdf" && loc.page != null) {
+    // rendered page image + the cited text's bounding boxes; works in any browser
+    const pages = [...new Set((loc.boxes || []).map((b) => b.page))];
+    if (!pages.length) pages.push(loc.page);
+    media = pages.map((pg) => {
+      const size = (chunk.page_sizes || {})[pg];
+      const boxes = size ? (loc.boxes || []).filter((b) => b.page === pg).map(({ bbox: [l, t, r, b] }) =>
+        `<div class="region" style="left:${l / size[0] * 100}%;top:${t / size[1] * 100}%;width:${(r - l) / size[0] * 100}%;height:${(b - t) / size[1] * 100}%"></div>`).join("") : "";
+      return `<div class="muted">page ${pg}</div><div class="imgwrap"><img src="${withToken(`/pages/${s.id}/${pg}.png`)}" alt="page ${pg}">${boxes}</div>`;
+    }).join("") + `<p class="muted"><a href="${file}#page=${loc.page}" target="_blank">open the PDF at page ${loc.page}</a></p>`;
+  } else if (s.modality === "image") {
+    const regions = (loc.regions || []).map(([x0, y0, x1, y1]) =>
+      `<div class="region" style="left:${x0 * 100}%;top:${y0 * 100}%;width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%"></div>`).join("");
+    media = `<div class="imgwrap"><img src="${withToken(`/files/${s.id}?upright=1`)}" alt="${esc(s.filename)}">${regions}</div>`;
+  } else if (s.modality === "audio" || s.modality === "video") {
+    media = `<${s.modality} controls preload="metadata" src="${file}" data-t="${t ?? 0}"></${s.modality}>
+      <div class="muted">starts at ${ts(t ?? 0)}</div>`;
+  } else {
+    media = `<p><a href="${file}" target="_blank">open file</a></p>`;
+  }
+  $("#viewer").innerHTML = `<h3>${esc(s.title || s.filename)}</h3>
+    <div class="muted">${esc(s.filename)} · ${esc(where(loc))} ${s.authors ? " · " + esc(s.authors.slice(0, 3).join(", ")) + (s.authors.length > 3 ? " et al." : "") : ""}</div>
+    ${media}
+    <div class="muted" style="margin-top:8px">${esc(chunk.context_header || "")}</div>
+    <pre class="passage">${esc(passageText || chunk.text)}</pre>`;
+  const player = $("#viewer").querySelector("audio, video");
+  if (player) {
+    const seek = () => { player.currentTime = +player.dataset.t; };
+    player.addEventListener("loadedmetadata", seek, { once: true });
+  }
+}
+
+// --- tasks ---
+async function loadTasks() {
+  const rows = await api("/api/tasks?include_done=true");
+  $("#tasks").innerHTML = rows.map((t) => `<tr>
+    <td>${t.due_date ?? "—"}</td><td class="muted">${esc(t.due_raw ?? "")}</td>
+    <td>${t.status === "done" ? "<s>" + esc(t.description) + "</s>" : esc(t.description)}
+      ${t.confirmed ? '<span class="tag">confirmed</span>' : ""}
+      <div class="muted">“${esc(t.evidence_quote ?? "")}” ${t.chunk_id ? `<a href="#" data-chunk="${t.chunk_id}">source</a>` : ""}</div></td>
+    <td>${esc(t.owner ?? "")}</td>
+    <td>${t.confirmed ? "" : `<button class="small" data-act="confirm" data-id="${t.id}">confirm</button>`}
+        ${t.status === "done" ? `<button class="small" data-act="reopen" data-id="${t.id}">reopen</button>` : `<button class="small" data-act="done" data-id="${t.id}">done</button>`}</td>
+  </tr>`).join("") || '<tr><td colspan="5" class="muted">No tasks yet.</td></tr>';
+  $("#tasks").querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
+    await api(`/api/tasks/${b.dataset.id}/${b.dataset.act}`, { method: "POST" }); loadTasks(); });
+  $("#tasks").querySelectorAll("[data-chunk]").forEach((a) => a.onclick = async (e) => {
+    e.preventDefault(); const ch = await api(`/api/chunks/${a.dataset.chunk}`); showChunk(ch, ch.locator.t_start); });
+}
+
+// --- sources ---
+async function loadSources() {
+  const rows = await api("/api/sources");
+  $("#sources").innerHTML = rows.map((s) => `<tr>
+    <td><a href="${withToken(s.file_url)}" target="_blank" class="name">${esc(s.filename)}</a>
+      <div class="muted">${esc(s.title && s.title !== s.filename ? s.title : "")}</div></td>
+    <td>${esc(s.modality)} · ${esc(s.source_type ?? "")}</td><td>${s.chunks}</td>
+    <td class="muted">${Object.entries(s.stages).map(([k, v]) => `${k}:${v}`).join(" ")}</td></tr>`).join("");
+}
+
+api("/api/health").then((h) => $("#status").textContent = "v" + h.version).catch(() => {});
+</script>
+</body>
+</html>

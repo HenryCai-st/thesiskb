@@ -4,9 +4,9 @@ A private, multimodal knowledge base with verified, cited retrieval — papers, 
 whiteboards, meeting recordings and interview videos, all searchable with answers that cite the
 exact page, image or timestamp.
 
-> Status: **Milestone 6 (router & person profiles)**. PDFs, photos, audio and video are indexed;
-> a router sends each question to the right path(s) — literature, person, task, entity or general
-> search — and every answer cites page, image or timestamp + speaker.
+> Status: **Milestone 7 (interfaces)**. PDFs, photos, audio and video are indexed; a router
+> sends each question to the right path(s), every answer cites page, image or timestamp + speaker,
+> and a web UI, REST/OpenAI-compatible API and MCP server expose it all.
 > See [BUILD_GUIDE.md](BUILD_GUIDE.md) for the full plan and [AGENTS.md](AGENTS.md) for rules
 > coding agents follow.
 
@@ -67,6 +67,37 @@ support check finds unsupported, are flagged with ⚠.
 Set `OLLAMA_MAX_LOADED_MODELS=1` and `OLLAMA_KEEP_ALIVE=5m` for Ollama so only one large
 model sits in VRAM at a time.
 
+## Web UI, API and MCP
+
+```bash
+uv run tkb serve                         # http://127.0.0.1:8000  (API docs at /docs)
+```
+
+The web UI answers with clickable citations: a PDF citation shows the rendered page with the
+cited paragraphs boxed, a photo is shown upright, and audio/video start playing at the quoted
+second (with the keyframe for video). The Tasks tab lets you confirm or tick off tasks.
+
+**Open WebUI / any OpenAI client:** add an OpenAI-compatible connection with base URL
+`http://localhost:8000/v1` (from Docker: `http://host.docker.internal:8000/v1`) and model
+`thesiskb`. Set `TKB_API_TOKEN` in `.env` and use it as the API key if the API is reachable
+from other machines — `tkb serve --host 0.0.0.0` refuses to start without one.
+
+**MCP (Claude Code, Claude Desktop, other agents):** the server runs on stdio.
+
+```bash
+claude mcp add thesiskb -- uv --directory /path/to/thesiskb run tkb mcp
+```
+
+or in a client's JSON config:
+
+```json
+{"mcpServers": {"thesiskb": {"command": "uv",
+  "args": ["--directory", "/path/to/thesiskb", "run", "tkb", "mcp"]}}}
+```
+
+Tools: `search`, `get_chunk`, `get_source`, `list_tasks`, `person_profile`, `ask`.
+See [ADR 0008](docs/adr/0008-interfaces.md).
+
 ## Development
 
 ```bash
@@ -91,6 +122,8 @@ src/thesiskb/
   retrieval/       hybrid search (pgvector + FTS, RRF), rerank, router, graph-lite (SQL)
   answer/          answer paths, cited generation, citation + support checks
   evaluation.py    `tkb eval`
+  api/             FastAPI app (REST, /v1 OpenAI-compatible, files) + static web UI
+  mcp/             MCP server (stdio)
   migrations/      Alembic migrations
   doctor.py        environment checks
   cli.py           `tkb` command

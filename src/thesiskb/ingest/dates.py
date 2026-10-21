@@ -111,6 +111,15 @@ def resolve_due(raw: str | None, anchor: date) -> date | None:
     return None
 
 
+def is_month_only(raw: str | None) -> bool:
+    """True for dates written without a day ("Nov", "Jan 2027", "05.2027")."""
+    if not raw:
+        return False
+    if found := parse_explicit(raw):
+        return found[1]
+    return bool(re.search(rf"^(?:end of |ende )?({_MONTH_RE})\.?$", raw.strip().lower()))
+
+
 def anchor_for(raw_dues: list[str | None], fallback: date) -> date:
     """Earliest explicit full date among a source's tasks, else the source's own date."""
     explicit = [d for r in raw_dues if r and (p := parse_explicit(r)) and not p[1] for d in [p[0]]]

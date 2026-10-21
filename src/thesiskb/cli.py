@@ -534,6 +534,30 @@ def statements(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Use 0.0.0.0 only behind a VPN, with a token"),
+    port: int = typer.Option(8000),
+) -> None:
+    """Start the REST API + web UI (and the OpenAI-compatible /v1 endpoint)."""
+    import uvicorn
+
+    settings = get_settings()
+    if host not in ("127.0.0.1", "localhost") and not settings.api_token:
+        console.print("[red]Refusing to listen on a network interface without TKB_API_TOKEN[/]")
+        raise typer.Exit(code=1)
+    console.print(f"ThesisKB on http://{host}:{port}  (API docs: /docs)")
+    uvicorn.run("thesiskb.api.app:app", host=host, port=port, log_level="info")
+
+
+@app.command("mcp")
+def mcp_cmd() -> None:
+    """Run the MCP server on stdio (for Claude Desktop/Code and other MCP clients)."""
+    from thesiskb.mcp.server import main
+
+    main()
+
+
+@app.command()
 def reindex(source: str = typer.Argument(..., help="sha256 prefix or part of filename")) -> None:
     """Redo chunk + embed for one source from its cached stage outputs (no GPU models)."""
     from thesiskb.core.db import session_scope

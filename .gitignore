@@ -22,3 +22,6 @@ build/
 .idea/
 .DS_Store
 Thumbs.db
+
+# local tool config (contains machine paths)
+.claude/

@@ -17,8 +17,9 @@ from thesiskb.core.models import Chunk, Person, Source, Task
 from thesiskb.llm.gateway import LLMGateway
 
 TASK_RULES = """- "Task:" passages are rows of the user's task table, already sorted by due date. \
-Keep that (chronological) order when listing several; "due" is the resolved date and "written" \
-is how the source wrote it."""
+Keep that (chronological) order when listing several. State each date as written in the source \
+("written: Jan 2027" → "January 2027"); the resolved "due" date is only for ordering and is \
+often just the end of a month — never present it as an exact day the source did not give."""
 
 
 def open_tasks(session: Session, include_done: bool = False) -> list[tuple[Task, str | None]]:
@@ -33,7 +34,15 @@ def open_tasks(session: Session, include_done: bool = False) -> list[tuple[Task,
 
 
 def task_row_text(t: Task, owner: str | None) -> str:
-    due = t.due_date.isoformat() if t.due_date else "no date"
+    from thesiskb.ingest.dates import is_month_only
+
+    if t.due_date is None:
+        due = "no date"
+    elif is_month_only(t.due_raw):
+        # the day is only a sort key (end of month): never show it as if the source gave it
+        due = t.due_date.strftime("%B %Y")
+    else:
+        due = t.due_date.strftime("%d %B %Y").lstrip("0")
     written = f" (written: {t.due_raw})" if t.due_raw else ""
     who = owner or t.owner_raw or "unassigned"
     flags = f" | status: {t.status}" + (" | confirmed" if t.confirmed else "")

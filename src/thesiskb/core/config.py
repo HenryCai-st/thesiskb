@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://thesiskb:thesiskb@localhost:5432/thesiskb"
     ollama_base_url: str = "http://localhost:11434"
     hf_token: str | None = None
+    api_token: str | None = None  # if set, the API/UI/MCP-over-HTTP require this bearer token
     tesseract_cmd: str = "tesseract"
     tessdata_dir: str | None = None  # language packs folder if not the install default
     config_dir: Path = REPO_ROOT / "config"

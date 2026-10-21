@@ -7,8 +7,10 @@ license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.13",
+    "fastapi>=0.115",
     "httpx>=0.27",
     "litellm>=1.50",
+    "mcp>=2.3",
     "pgvector>=0.3",
     "pillow>=10.0",
     "psycopg[binary]>=3.2",
@@ -18,6 +20,7 @@ dependencies = [
     "rich>=13.7",
     "sqlalchemy>=2.0",
     "typer>=0.12",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -65,8 +68,11 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.ruff.lint.flake8-bugbear]
-# typer declares CLI options as default-argument calls
-extend-immutable-calls = ["typer.Argument", "typer.Option"]
+# typer and FastAPI declare options/dependencies as default-argument calls
+extend-immutable-calls = [
+    "typer.Argument", "typer.Option",
+    "fastapi.Depends", "fastapi.Query", "fastapi.Header",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # prompt templates are prose
