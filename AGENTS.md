@@ -1,0 +1,12 @@
+# Rules for coding agents
+- Read BUILD_GUIDE.md first. Work on one milestone at a time; check its acceptance criteria before moving on.
+- Python 3.11+, uv, ruff, pytest, type hints, pydantic models at module boundaries.
+- All model calls go through src/thesiskb/llm/ (LiteLLM). Never import a vendor SDK elsewhere.
+- Every pipeline stage must be idempotent, keyed by source sha256, and write outputs to data/processed/<sha256>/.
+- Every chunk must have a locator. Never create chunks without source_id and locator.
+- Never load two large GPU models at once; use the pipeline scheduler.
+- Tests must run on CPU with mocked models. Put heavy/GPU tests behind a `gpu` pytest marker.
+- Never commit data/, .env, model weights, recordings or personal information.
+- Schema changes only via Alembic migrations.
+- When a design decision is made, add a short ADR in docs/adr/.
+- Run `tkb eval` after changes to retrieval, prompts or models and report the diff.

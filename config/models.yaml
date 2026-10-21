@@ -1,0 +1,40 @@
+# Model per role. `model` uses LiteLLM naming: "<provider>/<model>".
+# Local: ollama_chat/... (chat) and ollama/... (embeddings). Cloud: e.g. openai/gpt-..., anthropic/claude-...
+# `api_base` defaults to TKB_OLLAMA_BASE_URL for ollama* providers.
+# `vram_gb` is an approximate budget used by `tkb doctor` and (later) the GPU scheduler.
+# Pinned 2026-10 for a 16 GB GPU — revisit when better models appear (BUILD_GUIDE §11.1).
+
+roles:
+  answer:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 10
+    params:
+      temperature: 0.2
+
+  extraction:
+    model: ollama_chat/qwen3:14b
+    vram_gb: 10
+    params:
+      temperature: 0.0
+
+  vision:
+    model: ollama_chat/qwen2.5vl:7b
+    vram_gb: 7
+
+  embedding:
+    model: ollama/bge-m3
+    vram_gb: 1.5
+    dim: 1024
+
+  reranker:
+    # "cross_encoder" runs locally via sentence-transformers (install extra: `uv sync --extra local`).
+    # "litellm" uses litellm.rerank() (Cohere, Jina, ... in API mode).
+    backend: cross_encoder
+    model: BAAI/bge-reranker-v2-m3
+    vram_gb: 1.5
+
+  asr:
+    # Not called through LiteLLM; used by ingest/audio.py (Milestone 4).
+    backend: faster_whisper
+    model: large-v3-turbo
+    vram_gb: 4

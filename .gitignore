@@ -1,0 +1,24 @@
+# Data, secrets, model weights — never commit (see AGENTS.md)
+data/
+.env
+config/*.local.yaml
+*.safetensors
+*.gguf
+*.bin
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

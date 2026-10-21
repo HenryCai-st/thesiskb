@@ -1,0 +1,6 @@
+# Known people + aliases, seed for person resolution (Milestone 5/6).
+# Keep this file out of public commits if it contains real names — use config/people.local.yaml instead.
+people:
+  - name: Example Supervisor
+    aliases: [Prof. Example, Example]
+    role: supervisor

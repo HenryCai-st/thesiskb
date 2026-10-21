@@ -1,0 +1,57 @@
+[project]
+name = "thesiskb"
+version = "0.1.0"
+description = "Private, multimodal knowledge base with verified, cited retrieval."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.13",
+    "httpx>=0.27",
+    "litellm>=1.50",
+    "pgvector>=0.3",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "sqlalchemy>=2.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+# Local cross-encoder reranker (pulls torch; not needed for CI)
+local = ["sentence-transformers>=3.0"]
+
+[project.scripts]
+tkb = "thesiskb.cli:app"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=3.7",
+    "pytest>=8.2",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/thesiskb"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA GPU and real models (skipped in CI)",
+    "db: needs a running Postgres with pgvector (TKB_DATABASE_URL)",
+]
+addopts = "-m 'not gpu'"

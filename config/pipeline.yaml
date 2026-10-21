@@ -1,0 +1,25 @@
+data_dir: data
+raw_dir: data/raw
+processed_dir: data/processed
+pipeline_version: "0.1.0"
+
+chunking:
+  target_tokens: 600
+  max_tokens: 800
+  overlap_ratio: 0.12
+
+ocr:
+  languages: [deu, eng]
+
+video:
+  scene_threshold: 0.3
+  keyframe_fallback_seconds: 30
+
+audio:
+  sample_rate: 16000
+  turn_window_seconds: [60, 120]
+
+retrieval:
+  hybrid_top_k: 30
+  rerank_top_k: 8
+  rrf_k: 60
