@@ -127,8 +127,16 @@ def test_extract_chunk_uses_schema_and_drops_unrequested_fields():
     assert '"tasks"' not in messages[0]["content"]
 
 
-def test_extract_chunk_garbage_is_empty():
-    assert extract_chunk(FakeGateway("no json"), Chunk(text="x"), ["tasks"]) == Extraction()
+def test_extract_chunk_garbage_is_empty_and_marked_failed():
+    gw = FakeGateway("no json")
+    out = extract_chunk(gw, Chunk(text="x"), ["tasks"])
+    assert out.tasks == [] and out.entities == [] and out._failed
+    assert len(gw.calls) == 2 and gw.calls[1][2]["max_tokens"] == 6000  # one retry, more room
+
+
+def test_item_limits_are_in_the_schema():
+    schema = Extraction.model_json_schema()["properties"]
+    assert schema["entities"]["maxItems"] == 12 and schema["relations"]["maxItems"] == 8
 
 
 def test_month_only_detection():

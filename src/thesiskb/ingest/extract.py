@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, create_model
 from sqlalchemy import any_, delete, func, select
 from sqlalchemy.orm import Session
 
@@ -88,10 +88,14 @@ class XRelation(BaseModel):
 
 
 class Extraction(BaseModel):
-    tasks: list[XTask] = Field(default_factory=list)
-    statements: list[XStatement] = Field(default_factory=list)
-    entities: list[XEntity] = Field(default_factory=list)
-    relations: list[XRelation] = Field(default_factory=list)
+    # max_length becomes maxItems in the JSON schema, which Ollama's structured output enforces:
+    # asked politely ("at most 12"), qwen3 sometimes listed hundreds of entities until the token
+    # limit cut the JSON off mid-string
+    tasks: list[XTask] = Field(default_factory=list, max_length=20)
+    statements: list[XStatement] = Field(default_factory=list, max_length=20)
+    entities: list[XEntity] = Field(default_factory=list, max_length=12)
+    relations: list[XRelation] = Field(default_factory=list, max_length=8)
+    _failed: bool = PrivateAttr(default=False)  # unparsable after retry: don't cache
 
 
 PROMPT = """Extract structured facts from one passage of the user's private knowledge base.
@@ -220,12 +224,20 @@ def extract_chunk(
         text=chunk.text,
     )
     model = extraction_model(fields)
-    raw = gateway.chat([{"role": "user", "content": prompt}], role=role, response_format=model)
-    try:
-        out = model.model_validate(json.loads(raw))
-    except (ValidationError, ValueError) as e:
-        log.warning("unparsable extraction for chunk %s: %s", chunk.id, e)
-        return model()
+    out = None
+    for attempt, extra in enumerate(({}, {"max_tokens": 6000}), 1):  # retry once with more room
+        raw = gateway.chat(
+            [{"role": "user", "content": prompt}], role=role, response_format=model, **extra
+        )
+        try:
+            out = model.model_validate(json.loads(raw))
+            break
+        except (ValidationError, ValueError) as e:
+            log.warning("unparsable extraction for chunk %s (attempt %d): %s", chunk.id, attempt, e)
+    if out is None:
+        failed = model()
+        failed._failed = True
+        return failed
     for f in set(model.model_fields) - set(fields):
         setattr(out, f, [])
     return out
@@ -280,6 +292,7 @@ class ExtractReport(BaseModel):
     entities: int = 0
     relations: int = 0
     dropped_no_evidence: int = 0
+    failed_chunks: int = 0  # unparsable model output; retried on the next run
     plugins: dict[str, int] = Field(default_factory=dict)  # plug-in key → rows stored
 
 
@@ -305,8 +318,11 @@ def extract_source(
             x = extraction_model(fields).model_validate(cache[key])
         else:
             x = extract_chunk(gateway, c, fields, gateway.role_for("extraction", src.local_only))
-            cache[key] = x.model_dump()
             rep.llm_calls += 1
+            if x._failed:
+                rep.failed_chunks += 1  # not cached: the next run tries this chunk again
+            else:
+                cache[key] = x.model_dump()
             # save after every call: an interrupted run on a long paper resumes where it stopped
             cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
             if rep.llm_calls % 10 == 0:

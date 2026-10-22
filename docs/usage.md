@@ -152,6 +152,7 @@ setting made things better or worse.
 
 | Symptom | Fix |
 |---|---|
+| After a reboot: "Can't reach the database" or `APIConnectionError` | start **Docker Desktop** and the **Ollama** app (both need to run), then re-run the command — finished stages are skipped |
 | `tkb doctor`: Database FAIL | `docker compose up -d` (Docker Desktop must be running) |
 | Ollama: missing models | `ollama pull <name>` for each listed |
 | Diarization fails: 401/403 | `TKB_HF_TOKEN` in `.env`, and accept the model terms on Hugging Face |

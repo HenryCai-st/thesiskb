@@ -198,7 +198,8 @@ def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway)
     rep = extract_source(session, src, gateway, processed_dir(cfg, src.sha256) / "extract.json")
     log.info(
         "extract %s: %d chunks (%d LLM calls) → %d tasks, %d statements, %d entity mentions, "
-        "%d relations; %d items dropped without verbatim evidence",
+        "%d relations; %d items dropped without verbatim evidence; %d chunks unparsable "
+        "(retried next run)",
         src.path.rsplit("/", 1)[-1],
         rep.chunks,
         rep.llm_calls,
@@ -207,6 +208,7 @@ def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway)
         rep.entities,
         rep.relations,
         rep.dropped_no_evidence,
+        rep.failed_chunks,
     )
 
 
@@ -354,7 +356,13 @@ def _safe(
         return run_stage(session, src, stage, fn, force)
     except Exception as e:  # noqa: BLE001
         log.exception("%s failed for %s", stage, f.path.name)
-        report["failed"].append((f.path.name, f"{stage}: {type(e).__name__}: {e}"))
+        msg = f"{stage}: {type(e).__name__}: {e}"
+        if "APIConnectionError" in type(e).__name__ or "Connection refused" in str(e):
+            msg += (
+                f" — Ollama not reachable at {get_settings().ollama_base_url}; start the "
+                "Ollama app, then re-run (finished stages are skipped)"
+            )
+        report["failed"].append((f.path.name, msg))
         return False
 
 

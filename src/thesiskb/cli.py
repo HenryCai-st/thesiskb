@@ -859,5 +859,23 @@ def db_current() -> None:
     command.current(_alembic_config(), verbose=False)
 
 
+def main() -> None:
+    """Entry point of `tkb`: the CLI, with a readable message when the database is down."""
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        app()
+    except OperationalError as e:
+        if "connect" not in str(e).lower() and "timeout" not in str(e).lower():
+            raise
+        url = get_settings().database_url.rsplit("@", 1)[-1]  # host:port/db, no password
+        console.print(
+            f"[red]Can't reach the database ({escape(url)}).[/]\n"
+            "Is Docker Desktop running? Start it, then run:  docker compose up -d\n"
+            "[dim]Check everything with: uv run tkb doctor[/]"
+        )
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    app()
+    main()

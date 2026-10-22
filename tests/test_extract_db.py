@@ -133,3 +133,23 @@ def test_statements_resolve_people_by_alias(session, db_url):
     assert person.name == "Will.i.am" and st.person_raw == "Will I.M"
     s.delete(person)
     s.commit()
+
+
+def test_failed_chunk_is_not_cached_and_retried(session):
+    s, src, cache = session
+
+    class Flaky:
+        calls = 0
+
+        def role_for(self, role, local_only=False):
+            return role
+
+        def chat(self, messages, role="answer", **kw):
+            Flaky.calls += 1
+            return "{ truncated" if Flaky.calls <= 2 else json.dumps(PAYLOAD)
+
+    rep = extract_source(s, src, Flaky(), cache)
+    assert rep.failed_chunks == 1
+    assert json.loads(cache.read_text(encoding="utf-8")) == {}  # nothing cached for it
+    rep = extract_source(s, src, Flaky(), cache)  # next run tries again and succeeds
+    assert rep.failed_chunks == 0 and rep.tasks == 2

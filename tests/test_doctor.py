@@ -64,3 +64,20 @@ def test_cli_doctor_exit_code(monkeypatch, fail, code):
     out = CliRunner().invoke(cli.app, ["doctor"])
     assert out.exit_code == code, out.output
     assert "answer" in out.output
+
+
+def test_cli_main_explains_unreachable_database(monkeypatch, capsys):
+    from sqlalchemy.exc import OperationalError
+
+    from thesiskb import cli
+
+    def down():
+        raise OperationalError("SELECT 1", {}, Exception("connection timeout expired"))
+
+    monkeypatch.setattr(cli, "app", down)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "Can't reach the database" in out and "docker compose up -d" in out
+    assert "thesiskb:thesiskb" not in out  # never print the password
