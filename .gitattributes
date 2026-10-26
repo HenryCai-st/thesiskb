@@ -2,4 +2,5 @@
 *.png binary
 *.jpg binary
 *.pdf binary
-*.bat -text   # stored as-is (CRLF): also correct when downloaded from GitHub raw
+# .bat stored as-is (CRLF), so a raw download from GitHub also runs correctly
+*.bat -text
