@@ -18,6 +18,7 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -302,6 +303,7 @@ def extract_source(
     gateway: LLMGateway,
     cache_path: Path,
     reference_date: date | None = None,
+    on_chunk: Callable[[int, int], None] | None = None,
 ) -> ExtractReport:
     fields = fields_for(src)
     chunks = session.scalars(select(Chunk).where(Chunk.source_id == src.id)).all()
@@ -325,8 +327,10 @@ def extract_source(
                 cache[key] = x.model_dump()
             # save after every call: an interrupted run on a long paper resumes where it stopped
             cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
-            if rep.llm_calls % 10 == 0:
+            if rep.llm_calls % 10 == 0 and on_chunk is None:
                 log.info("extract: %d/%d chunks", i, len(chunks))
+        if on_chunk:
+            on_chunk(i, len(chunks))
         x, dropped = verified(x, c.text)
         rep.dropped_no_evidence += dropped
         results.append((c, x))

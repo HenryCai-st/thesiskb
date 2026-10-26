@@ -93,13 +93,28 @@ def ingest(
     import logging
     from collections import Counter
 
+    from rich.logging import RichHandler
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
     from thesiskb.core.db import session_scope
     from thesiskb.ingest.detect import detect
     from thesiskb.ingest.pipeline import ingest as run_ingest
     from thesiskb.ingest.pipeline import supported_modalities
     from thesiskb.llm import get_gateway
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    # logs go through the same console as the progress bars, so they print above them
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[RichHandler(console=console, show_path=False, show_time=False)],
+    )
     for noisy in ("LiteLLM", "httpx", "docling", "transformers"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = get_pipeline_config()
@@ -114,7 +129,32 @@ def ingest(
         if f.modality not in modalities:
             console.print(f"  [dim]skip (no parser for {f.modality}): {f.path.name}[/]")
 
-    with session_scope() as session:
+    # one step = one file through one stage; already-done steps complete instantly
+    # bar and counts first: on a narrow terminal only the file name at the end gets cut
+    columns = (
+        BarColumn(bar_width=24),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("eta"),
+        TimeRemainingColumn(),
+        TextColumn("{task.description}"),
+    )
+    with session_scope() as session, Progress(*columns, console=console) as bar:
+        total = bar.add_task("steps (file x stage)", total=len(supported) * (4 if extract else 3))
+        chunks = bar.add_task("", total=1, visible=False)
+
+        def fit(text: str) -> str:  # the bar and counts take ~60 columns; cut only the label
+            room = max(12, console.width - 62)
+            return text if len(text) <= room else text[: room - 1] + "…"
+
+        def progress(stage, name, done=None, of=None):
+            if done is None:  # a file finished a stage
+                bar.update(total, advance=1, description=fit(f"{stage} ✓ {name}"))
+                bar.update(chunks, visible=False)
+            else:  # extraction, chunk by chunk
+                label = fit(f"extract {name}")
+                bar.update(chunks, completed=done, total=of, visible=True, description=label)
+
         report = run_ingest(
             session,
             supported,
@@ -125,7 +165,9 @@ def ingest(
             metadata_lookup=bool((cfg.model_extra or {}).get("metadata_lookup", True)),
             extract=extract,
             local_only=local_only,
+            progress=progress,
         )
+    console.print()  # end the progress-bar line
     failed = report.pop("failed")
     work = ", ".join(f"{stage}: {n}" for stage, n in report.items())
     console.print(f"Work done — {work}" + ("" if any(report.values()) else " (nothing to do)"))

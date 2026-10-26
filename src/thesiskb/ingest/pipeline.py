@@ -111,7 +111,11 @@ def ingest(
     metadata_lookup: bool = True,
     extract: bool = True,
     local_only: bool = False,
+    progress: Callable[..., None] | None = None,
 ) -> IngestReport:
+    """`progress(stage, filename)` is called once per file and stage (also when skipped or
+    failed, so a bar always completes); `progress("extract", filename, i, n)` per chunk."""
+    step = progress or (lambda *a: None)
     report = IngestReport({s: 0 for s in STAGES})
     report["failed"] = []
     modalities = supported_modalities(cfg)
@@ -121,7 +125,7 @@ def ingest(
         if f.modality in modalities
     ]
     session.commit()
-    ctx = _context(session, cfg, gateway, report, force, metadata_lookup)
+    ctx = _context(session, cfg, gateway, report, force, metadata_lookup, step)
 
     # --- parse: one batch per parser, so each GPU model family is loaded once ---
     todo: dict[str, list[tuple[Source, DetectedFile]]] = {}
@@ -130,9 +134,11 @@ def ingest(
         if force:
             pass
         elif job_done(session, s, "parse"):
+            step("parse", f.path.name)
             continue
         elif parse_output(cfg, s).exists():
             run_stage(session, s, "parse", lambda: None)  # output cached on disk; no GPU work
+            step("parse", f.path.name)
             continue
         parser = parser_for(s.modality)
         parsers[parser.name] = parser
@@ -143,6 +149,7 @@ def ingest(
     # --- chunk (CPU) ---
     count = get_token_counter()
     for src, f in sources:
+        step("chunk", f.path.name)
         if not job_done(session, src, "parse"):
             continue
         work = partial(parser_for(src.modality).chunk, ctx, src, f, count)
@@ -156,6 +163,7 @@ def ingest(
 
     # --- embed (Ollama bge-m3) ---
     for src, f in sources:
+        step("embed", f.path.name)
         if not job_done(session, src, "chunk"):
             continue
         work = partial(_embed_source, session, src, gateway)
@@ -165,22 +173,26 @@ def ingest(
     # --- extract (answer-size LLM; cached per chunk text) ---
     if extract:
         for src, f in sources:
-            if not job_done(session, src, "embed"):
-                continue
-            work = partial(_extract_source, session, src, cfg, gateway)
-            if _safe(report, session, src, f, "extract", work, force):
-                report["extract"] += 1
+            if job_done(session, src, "embed"):
+                on_chunk = partial(step, "extract", f.path.name)
+                work = partial(_extract_source, session, src, cfg, gateway, on_chunk)
+                if _safe(report, session, src, f, "extract", work, force):
+                    report["extract"] += 1
+            step("extract", f.path.name)
     return report
 
 
-def _context(session, cfg, gateway, report, force=False, metadata_lookup=True) -> ParseContext:
+def _context(
+    session, cfg, gateway, report, force=False, metadata_lookup=True, step=lambda *a: None
+) -> ParseContext:
     """ParseContext whose mark() records each file's parse stage in jobs (and the report)."""
 
     def mark(src, f, fn) -> bool:
-        if _safe(report, session, src, f, "parse", fn, force=True):
+        ok = _safe(report, session, src, f, "parse", fn, force=True)
+        if ok:
             report["parse"] = report.get("parse", 0) + 1
-            return True
-        return False
+        step("parse", f.path.name)
+        return ok
 
     return ParseContext(
         session=session,
@@ -192,10 +204,11 @@ def _context(session, cfg, gateway, report, force=False, metadata_lookup=True) -
     )
 
 
-def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway) -> None:
+def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway, on_chunk=None):
     from thesiskb.ingest.extract import extract_source
 
-    rep = extract_source(session, src, gateway, processed_dir(cfg, src.sha256) / "extract.json")
+    out = processed_dir(cfg, src.sha256) / "extract.json"
+    rep = extract_source(session, src, gateway, out, on_chunk=on_chunk)
     log.info(
         "extract %s: %d chunks (%d LLM calls) → %d tasks, %d statements, %d entity mentions, "
         "%d relations; %d items dropped without verbatim evidence; %d chunks unparsable "

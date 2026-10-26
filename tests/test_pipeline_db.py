@@ -141,3 +141,21 @@ def test_moved_file_updates_path_without_rework(setup, tmp_path):
     assert (report["parse"], report["chunk"], report["embed"]) == (0, 0, 0)
     src = session.scalar(select(Source).where(Source.path.like("%sub/fake paper.pdf")))
     assert src is not None
+
+
+def test_progress_counts_every_file_and_stage(setup):
+    session, cfg, pdf = setup
+    calls = []
+    for _ in range(2):  # first run does the work, second run skips everything
+        calls.clear()
+        pipeline.ingest(
+            session,
+            detect([pdf]),
+            cfg,
+            FakeGateway(),
+            metadata_lookup=False,
+            extract=False,
+            progress=lambda *a: calls.append(a),
+        )
+        assert [c[0] for c in calls] == ["parse", "chunk", "embed"]  # 1 file x 3 stages
+        assert all(c[1] == "fake paper.pdf" for c in calls)
