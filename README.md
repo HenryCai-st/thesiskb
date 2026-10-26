@@ -27,7 +27,13 @@ Tested end to end on Windows 10 with an RTX 4070 Ti SUPER (16 GB). The code is
 platform-independent and CI runs the test suite plus a CPU integration test on Linux; the full
 GPU setup on Linux/WSL2 follows the same steps but has not been run yet (BUILD_GUIDE Milestone 9).
 
-**Prerequisites:** [Docker](https://docs.docker.com/get-docker/), [Ollama](https://ollama.com),
+**Windows, one step:** download [setup.bat](setup.bat) and double-click it. It installs Git, uv,
+ffmpeg, Tesseract, Docker Desktop and Ollama (winget), clones this repo to `%USERPROFILE%\thesiskb`,
+configures `.env`, builds the environment, creates the database, pulls the models (~20 GB) and
+runs `tkb doctor`. Safe to re-run; on a PC without WSL2 it enables it and asks for one restart.
+Options: `-InstallDir D:\kb`, `-SkipModels`, `-HfToken hf_...`.
+
+**By hand — prerequisites:** [Docker](https://docs.docker.com/get-docker/), [Ollama](https://ollama.com),
 [uv](https://docs.astral.sh/uv/), ffmpeg, [Tesseract](https://tesseract-ocr.github.io/) with the
 `deu` + `eng` language packs, an NVIDIA GPU with current drivers (or see *Small / CPU setup*).
 

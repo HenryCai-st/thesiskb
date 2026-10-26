@@ -25,3 +25,4 @@ Thumbs.db
 
 # local tool config (contains machine paths)
 .claude/
+setup.log
