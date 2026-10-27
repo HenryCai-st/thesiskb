@@ -2,7 +2,7 @@
 
 import zipfile
 
-from docling_core.types.doc import DocItemLabel, DoclingDocument
+import pytest
 
 from thesiskb.answer.generate import locator_label
 from thesiskb.api.app import text_fragment
@@ -12,6 +12,8 @@ from thesiskb.ingest.documents import document_meta, extract_blocks
 
 
 def _pageless_doc(tmp_path):
+    doc = pytest.importorskip("docling_core.types.doc")  # in the "local" extra, not in CI
+    DocItemLabel, DoclingDocument = doc.DocItemLabel, doc.DoclingDocument  # noqa: N806
     d = DoclingDocument(name="book")
     d.add_title(text="Table of Contents")
     d.add_list_item(text="Chapter 1")
