@@ -144,7 +144,11 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error((await r.text()) || r.statusText);
   return r.json();
 }
-const withToken = (url) => token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) : url;
+const withToken = (url) => {  // ?token= goes before any #fragment
+  if (!token) return url;
+  const [base, frag] = url.split(/(?=#)/);
+  return base + (base.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token) + (frag || "");
+};
 const ts = (s) => { s = Math.floor(s); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, "0")}`; };
 
 // --- tabs ---
@@ -231,6 +235,7 @@ function where(loc) {
   if (loc.page != null) return loc.page_end && loc.page_end !== loc.page ? `pp. ${loc.page}–${loc.page_end}` : `p. ${loc.page}`;
   if (loc.t_start != null) return `${ts(loc.t_start)}–${ts(loc.t_end ?? loc.t_start)}`;
   if (loc.image) return "image";
+  if (loc.part != null) return loc.part || "section";
   return "";
 }
 
@@ -279,6 +284,8 @@ function showChunk(chunk, t, passageText) {
   } else if (s.modality === "audio" || s.modality === "video") {
     media = `<${s.modality} controls preload="metadata" src="${file}" data-t="${t ?? 0}"></${s.modality}>
       <div class="muted">starts at ${ts(t ?? 0)}</div>`;
+  } else if (loc.part != null && chunk.links && chunk.links.open_url) {
+    media = `<p class="muted"><a href="${withToken(chunk.links.open_url)}" target="_blank">open the document at this passage</a> · <a href="${file}" target="_blank">original file</a></p>`;
   } else {
     media = `<p><a href="${file}" target="_blank">open file</a></p>`;
   }

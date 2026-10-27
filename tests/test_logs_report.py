@@ -63,3 +63,16 @@ def test_report_has_no_secrets(tmp_path, monkeypatch, clean_root):
     for secret in ("hf_SuperSecretToken123", "api-token-456", "sk-ant-secret-789", "dbPassw0rd"):
         assert secret not in blob
     assert "***" in blob
+
+
+def test_eval_summary_counts_errors_separately():
+    from thesiskb.evaluation import QuestionResult, summarize
+
+    results = [
+        QuestionResult(id="a", type="general", status="ran", retrieval_hit=True, citation_hit=True),
+        QuestionResult(id="b", type="general", status="skipped", reason="not ingested"),
+        QuestionResult(id="c", type="general", status="error", reason="error: InternalServerError"),
+    ]
+    s = summarize(results)
+    assert (s["ran"], s["skipped"], s["errors"]) == (1, 1, 1)
+    assert s["retrieval_hit_rate"] == 1.0

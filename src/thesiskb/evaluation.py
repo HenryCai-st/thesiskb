@@ -33,7 +33,7 @@ class GoldQuestion(BaseModel):
 class QuestionResult(BaseModel):
     id: str
     type: str
-    status: str  # ran | skipped
+    status: str  # ran | skipped | error
     reason: str | None = None
     routed: list[str] = Field(default_factory=list)
     route_ok: bool | None = None
@@ -83,10 +83,16 @@ def run_eval(
             continue
         expected = {by_name[n].id for n in names}
         gold_paths = [q.path] if isinstance(q.path, str) else list(q.path)
-        if oracle:  # bypass the router: answer with the gold path
-            ans = answer(session, gateway, q.question, cfg, path=gold_paths[0], channel="eval")
-        else:
-            ans = answer(session, gateway, q.question, cfg, path="auto", channel="eval")
+        try:  # one model failure (e.g. Ollama aborting a repetition loop) must not end the run
+            ans = answer(
+                session, gateway, q.question, cfg,
+                path=gold_paths[0] if oracle else "auto",  # oracle: bypass the router
+                channel="eval",
+            )  # fmt: skip
+        except Exception as e:  # noqa: BLE001 - recorded; the trace has the traceback
+            reason = f"error: {type(e).__name__}: {str(e)[:120]}"
+            results.append(QuestionResult(id=q.id, type=q.type, status="error", reason=reason))
+            continue
         routed = (ans.route or {}).get("paths", [])
         # correct if the gold path is among those the router chose (extra paths cost time, not
         # correctness); "general" gold is also satisfied by any search path
@@ -154,7 +160,8 @@ def summarize(results: list[QuestionResult]) -> dict[str, Any]:
     checked = sum(r.checked for r in ran)
     return {
         "ran": len(ran),
-        "skipped": len(results) - len(ran),
+        "skipped": sum(r.status == "skipped" for r in results),
+        "errors": sum(r.status == "error" for r in results),
         "retrieval_hit_rate": round(sum(bool(r.retrieval_hit) for r in ran) / n, 3),
         "citation_hit_rate": round(sum(bool(r.citation_hit) for r in ran) / n, 3),
         "invalid_citations": sum(r.invalid_citations for r in ran),

@@ -15,6 +15,9 @@ fixtures:
   schedule: 5389068047127093167.jpg              # handwritten thesis timeline, photo rotated 90°
   jetson_video: YTDown.com_YouTube_Media_S9L2WGf1KrM_Introducing-NVIDIA-Jetson-Orin-Nano-Super-The-World-s-Most-Affordable-Generative_001_1080p.mp4
   dgx_audio: "Sparking Something Big_ NVIDIA DGX Spark Has Arrived.mp3"
+  sample_epub: minimal.epub                      # "Sample .epub Book": 2 lorem-ipsum chapters + copyright page
+  sideby_html: "SideBy _ Vivien Cai Portfolio.html"  # saved page of viviencai.com/projects/sideby
+  granola_csv: granola-export-test.csv           # Granola export: AI summary + transcript per meeting (ingested from M13)
 
 questions:
   # --- Literature (Q1 type) ---
@@ -150,3 +153,45 @@ questions:
     notes: >
       Aggregation across sources (entity-centric). The entities/relations tables hold both
       products; this tests whether retrieval alone gathers them or a graph lookup is needed.
+
+  # --- Page-less documents (Milestone 11) and meeting exports (Milestone 13) ---
+  - id: epub-01
+    question: What is the difference between chapter 1 and chapter 2?
+    type: general
+    path: [general]     # the question names no book; general search covers books too
+    expected_sources: [sample_epub]
+    expected_facts:
+      - Both chapters contain only placeholder "Lorem ipsum" text, so there is no difference in content
+      - Each chapter is cited separately (Chapter 1 and Chapter 2)
+    notes: Tests EPUB ingest; citations must name the chapter, not a page.
+
+  - id: web-01
+    question: >
+      Based on the SideBy project page, what problem does the project aim to solve, how does
+      the proposed design address that problem, and how do the images or videos demonstrate
+      the solution?
+    type: general
+    path: [general]
+    expected_sources: [sideby_html]
+    expected_facts:
+      - Problem - therapy feels intimidating/overwhelming at the start; fear of judgment and stigma keep people from seeking help (depression affects over 280 million people)
+      - Design - an app built on empowerment, connection, encouragement and simplicity (self-disclosure, goal setting, progress, low cognitive load) that supports people before and during therapy and connects them with therapists
+      - Images - process visuals (scenario maps, low/mid-fidelity wireframes, final screens such as safe space, mood, summary, therapist dashboard) show how the flow was developed
+    notes: >
+      Saved copy of a live page (layout broken, assets in the _files folder). Images are
+      represented by their alt text/captions; the three videos are hosted on the site and are
+      not in the saved copy (whole-site/URL ingest is Milestone 17).
+
+  - id: granola-01
+    question: >
+      What did the team decide regarding the scope of their Bachelor project - developing a
+      universal Strategic Foresight framework versus focusing on a concrete use case - and
+      which specific topic and target group did they select to move forward with?
+    type: general
+    path: [general]
+    expected_sources: [granola_csv]
+    expected_facts:
+      - Start with one concrete use case, apply all methods to it, and abstract to a framework later if possible
+      - Topic - "KI am Arbeitsplatz" (AI at the workplace)
+      - Target group - Berufseinsteiger (entry-level / junior workers)
+    notes: Skipped until CSV ingest exists (Milestone 13).

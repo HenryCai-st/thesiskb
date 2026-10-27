@@ -113,6 +113,8 @@ def locator_label(loc: dict[str, Any]) -> str:
         if loc.get("rotation"):
             parts.append(f"shown rotated {loc['rotation']}°")
         return ", ".join(parts)
+    if loc.get("part") is not None:
+        return loc["part"] or "section"
     return ""
 
 

@@ -114,6 +114,8 @@ def citation_links(session: Session, chunk_id: uuid.UUID) -> dict[str, Any]:
     }
     if loc.get("page") is not None:
         out["open_url"] = f"/files/{src.id}#page={loc['page']}"
+    elif loc.get("part") is not None:  # EPUB/HTML: rendered view, scrolled to the passage
+        out["open_url"] = f"/view/{src.id}{text_fragment(chunk.text)}"
     elif loc.get("t_start") is not None:
         out["open_url"] = f"/files/{src.id}#t={int(loc['t_start'])}"
     else:
@@ -121,6 +123,15 @@ def citation_links(session: Session, chunk_id: uuid.UUID) -> dict[str, Any]:
             f"/files/{src.id}?upright=1" if src.modality == "image" else out["file_url"]
         )
     return out
+
+
+def text_fragment(text: str, words: int = 16) -> str:
+    """URL text fragment (#:~:text=) for the first words of a passage; browsers scroll to it."""
+    from urllib.parse import quote
+
+    first = text.strip().split("\n", 1)[0].removeprefix("Image: ")
+    snippet = " ".join(first.split()[:words])
+    return "#:~:text=" + quote(snippet, safe="").replace("-", "%2D") if snippet else ""
 
 
 # --- API -----------------------------------------------------------------------------------
@@ -359,6 +370,33 @@ def file(
         raise HTTPException(status_code=410, detail="file moved; re-run tkb ingest on it")
     # inline, so PDFs open in the browser viewer at #page=N
     return FileResponse(path, content_disposition_type="inline", filename=path.name)
+
+
+@app.get("/view/{source_id}", response_class=HTMLResponse)
+def view(
+    source_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    token: str | None = Query(default=None),
+) -> str:
+    """EPUB/HTML sources rendered from their parsed text (one readable page, no scripts)."""
+    expected = get_settings().api_token
+    if expected and token != expected:
+        raise HTTPException(status_code=401)
+    from thesiskb.ingest.pipeline import processed_dir
+
+    s = session.get(Source, source_id)
+    if s is None:
+        raise HTTPException(status_code=404)
+    out = processed_dir(get_pipeline_config(), s.sha256)
+    cached = out / "view.html"
+    if not cached.exists():
+        if not (out / "docling.json").exists():
+            raise HTTPException(status_code=404, detail="not parsed yet; run tkb ingest")
+        from docling_core.types.doc import DoclingDocument
+
+        doc = DoclingDocument.load_from_json(out / "docling.json")
+        cached.write_text(doc.export_to_html(), encoding="utf-8")
+    return cached.read_text(encoding="utf-8")
 
 
 @app.get("/pages/{source_id}/{page}.png")

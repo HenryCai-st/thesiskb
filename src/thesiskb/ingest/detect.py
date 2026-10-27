@@ -24,6 +24,8 @@ MODALITY_BY_SUFFIX = {
     ".pptx": "document",
     ".md": "document",
     ".html": "document",
+    ".htm": "document",
+    ".xhtml": "document",
     ".jpg": "image",
     ".jpeg": "image",
     ".png": "image",
@@ -61,10 +63,24 @@ def detect_modality(path: Path) -> str | None:
     return MODALITY_BY_SUFFIX.get(path.suffix.lower())
 
 
+def _saved_page_asset(f: Path) -> bool:
+    """A file inside "<name>_files/" next to "<name>.html" (a browser's "Save page as")."""
+    for d in f.parents:
+        if d.name.endswith("_files"):
+            stem = d.name.removesuffix("_files")
+            if any((d.parent / (stem + ext)).exists() for ext in (".html", ".htm")):
+                return True
+    return False
+
+
 def iter_input_files(paths: Iterable[Path]) -> Iterable[Path]:
     for p in paths:
         if p.is_dir():
-            yield from sorted(f for f in p.rglob("*") if f.is_file() and detect_modality(f))
+            yield from sorted(
+                f
+                for f in p.rglob("*")
+                if f.is_file() and detect_modality(f) and not _saved_page_asset(f)
+            )
         elif p.is_file() and detect_modality(p):
             yield p
 
@@ -82,6 +98,10 @@ def detect(paths: Iterable[Path]) -> list[DetectedFile]:
 
 
 def default_source_type(f: DetectedFile) -> str | None:
+    if f.modality == "epub":
+        return "book"
+    if f.path.suffix.lower() in (".html", ".htm", ".xhtml"):
+        return "web"
     if f.modality in DOCUMENT_MODALITIES:
         return "paper"
     return {"image": "note", "audio": "meeting", "video": "demo"}.get(f.modality)

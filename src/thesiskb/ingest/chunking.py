@@ -66,6 +66,7 @@ def merge_locators(locators: list[dict[str, Any]]) -> dict[str, Any]:
     Page-based: {"page": first, "page_end": last, "boxes": [{"page", "bbox"}, ...]}
     Time-based: {"t_start": min, "t_end": max}
     Image-based: {"image": path, "rotation": deg, "regions": [[x0, y0, x1, y1], ...]}
+    Section-based (EPUB/HTML): {"part": "Chapter 2", "order": first block, "order_end": last}
     """
     out: dict[str, Any] = {}
     images = [loc for loc in locators if loc.get("image")]
@@ -99,6 +100,10 @@ def merge_locators(locators: list[dict[str, Any]]) -> dict[str, Any]:
             for locator in locators
             if locator.get("line") is not None
         )
+    orders = [loc["order"] for loc in locators if loc.get("order") is not None]
+    if orders:  # page-less documents (EPUB/HTML): section label + block range
+        out["part"] = next((loc["part"] for loc in locators if loc.get("part")), "")
+        out["order"], out["order_end"] = min(orders), max(orders)
     speakers = sorted({loc["speaker"] for loc in locators if loc.get("speaker")})
     if speakers:
         out["speakers"] = speakers

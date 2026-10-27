@@ -1,8 +1,11 @@
-"""Docling wrapper: PDF/Office → page-located blocks with section paths.
+"""Docling wrapper: PDF/Office/EPUB/HTML → located blocks with section paths.
 
 Two steps so the GPU part runs once:
   convert()        Docling (GPU layout/table models) → data/processed/<sha>/docling.json
   extract_blocks() docling.json → blocks with {page, bbox} locators (CPU, cheap to re-run)
+
+EPUB and HTML have no pages: their blocks get {"part": <section path>, "order": n} instead,
+and the viewer finds the passage by its text.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from thesiskb.ingest.chunking import Block
 
 SKIP_LABELS = {"page_header", "page_footer", "document_index"}
 SKIP_SECTIONS = re.compile(r"^(references|bibliography|literatur(verzeichnis)?)$", re.I)
+TOC_SECTIONS = re.compile(r"^(table of contents|contents|inhalt(sverzeichnis)?)$", re.I)
 _NUMBERED = re.compile(r"^(?:[A-Z]|\d+)(?:\.\d+)*\.?\s+\S")
 _RUNNING_AUTHOR = re.compile(r"\bet al\.?$")  # "Yang et al." running page header
 _TOP_LEVEL_WORDS = re.compile(
@@ -97,10 +101,19 @@ def _strip_furniture(text: str, furniture: set[str]) -> str:
 
 
 def extract_blocks(docling_json: Path) -> ParsedDocument:
-    from docling_core.types.doc import DoclingDocument, SectionHeaderItem, TableItem, TextItem
+    from docling_core.types.doc import (
+        DoclingDocument,
+        PictureItem,
+        SectionHeaderItem,
+        TableItem,
+        TextItem,
+    )
 
     doc = DoclingDocument.load_from_json(docling_json)
     page_sizes = {n: (p.size.width, p.size.height) for n, p in doc.pages.items()}
+    paged = bool(doc.pages)  # False for EPUB/HTML: no provenance, located by section instead
+    # web/EPUB images bring only their alt text/caption; it becomes an "Image: …" block
+    picture_captions = {c.cref for p in doc.pictures for c in p.captions} if not paged else set()
 
     items: list[tuple[Any, int]] = [(item, level) for item, level in doc.iterate_items()]
     furniture = _furniture(
@@ -115,16 +128,19 @@ def extract_blocks(docling_json: Path) -> ParsedDocument:
 
     for item, _level in items:
         label = str(getattr(item, "label", ""))
-        if label in SKIP_LABELS or not getattr(item, "prov", None):
+        if label in SKIP_LABELS or (paged and not getattr(item, "prov", None)):
             continue
-        prov = item.prov[0]
-        page = prov.page_no
+        prov = item.prov[0] if paged else None
+        page = prov.page_no if prov else None
 
         if isinstance(item, SectionHeaderItem) or label == "title":
             text = _norm(item.text)
             if not text or text in furniture or _RUNNING_AUTHOR.search(text):
                 continue
-            if title is None and page == 1:
+            if not paged and TOC_SECTIONS.match(text.rstrip(":")):
+                stack, skipping = [(text, False)], True  # EPUB navigation page
+                continue
+            if title is None and page == 1:  # page-less: title from metadata (document_meta)
                 title = text
                 continue
             depth = _heading_depth(text)
@@ -154,9 +170,20 @@ def extract_blocks(docling_json: Path) -> ParsedDocument:
             kind = {"caption": "caption", "list_item": "list", "footnote": "footnote"}.get(
                 label, "text"
             )
+            if item.self_ref in picture_captions:
+                continue  # emitted with its picture
+        elif isinstance(item, PictureItem) and not paged and item.caption_text(doc):
+            text, kind = f"Image: {_norm(item.caption_text(doc))}", "caption"
         else:
             continue  # pictures (captions come as separate items), formulas without text
 
+        if not paged:
+            part = " › ".join(s[0] for s in stack) or title or ""
+            locator = {"part": part, "order": len(blocks)}
+            blocks.append(
+                Block(text=text, kind=kind, section=[s[0] for s in stack], locator=locator)
+            )
+            continue
         height = page_sizes.get(page, (0, 0))[1]
         bb = prov.bbox.to_top_left_origin(page_height=height) if height else prov.bbox
         locator = {"page": page, "bbox": [round(v, 1) for v in (bb.l, bb.t, bb.r, bb.b)]}
@@ -169,6 +196,31 @@ def extract_blocks(docling_json: Path) -> ParsedDocument:
         page_texts={p: "\n\n".join(ts) for p, ts in page_texts.items()},
         page_sizes=page_sizes,
     )
+
+
+def document_meta(path: Path, modality: str) -> tuple[str | None, list[str]]:
+    """Title and authors of page-less documents: EPUB package metadata, HTML <title>."""
+    import zipfile
+    from html import unescape
+
+    try:
+        if modality == "epub":
+            with zipfile.ZipFile(path) as z:
+                container = z.read("META-INF/container.xml").decode("utf-8", "replace")
+                opf_path = re.search(r'full-path="([^"]+)"', container).group(1)
+                opf = z.read(opf_path).decode("utf-8", "replace")
+            title = re.search(r"<dc:title[^>]*>(.*?)</dc:title>", opf, re.S)
+            authors = re.findall(r"<dc:creator[^>]*>(.*?)</dc:creator>", opf, re.S)
+            return (unescape(_norm(title.group(1))) if title else None), [
+                unescape(_norm(a)) for a in authors
+            ]
+        if path.suffix.lower() in (".html", ".htm", ".xhtml"):
+            head = path.read_text(encoding="utf-8", errors="replace")[:200_000]
+            title = re.search(r"<title[^>]*>(.*?)</title>", head, re.S | re.I)
+            return (unescape(_norm(title.group(1))) if title else None), []
+    except (OSError, KeyError, AttributeError, zipfile.BadZipFile):
+        pass
+    return None, []
 
 
 _GERMAN = {"der", "die", "und", "das", "nicht", "ist", "mit", "für", "auf", "sich", "eine", "wir"}

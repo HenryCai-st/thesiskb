@@ -19,7 +19,9 @@ not re-process it, and exact duplicates are ingested once.
 
 | You have | Put it in `data/raw/` as | What happens |
 |---|---|---|
-| Paper / book chapter | `.pdf` (`.docx`, `.pptx`, `.md`, `.html` also work) | Pages, sections, tables, figure captions; title/authors/date looked up for arXiv files |
+| Paper / book chapter | `.pdf` (`.docx`, `.pptx`, `.md` also work) | Pages, sections, tables, figure captions; title/authors/date looked up for arXiv files |
+| E-book | `.epub` | Chapters and sections; citations name the chapter (no pages); title/author from the book |
+| Saved web page | `.html` (browser "Save page as", the `_files` folder next to it is ignored) | Text by section, images by their alt text; videos hosted on the site are not included |
 | Photo of whiteboard, post-its, handwritten notes | `.jpg` / `.png` / `.heic` | Turned upright, read by the vision model (handwriting) and OCR; post-its become one item each |
 | Meeting / interview recording | `.mp3`, `.wav`, `.m4a` | Transcribed with timestamps, split by speaker |
 | Video (interview, product demo) | `.mp4`, `.mkv`, `.mov` | As audio, plus keyframes described by the vision model |
@@ -32,7 +34,7 @@ uv run tkb sources                             # what is in the KB, and each fil
 ```
 
 Source types steer answering: `paper`/`book` feed the literature path, `meeting`/`interview`/`note`
-are scanned for tasks. Defaults: documents → paper, photos → note, audio → meeting, video → demo.
+are scanned for tasks. Defaults: e-books → book, web pages → web, other documents → paper, photos → note, audio → meeting, video → demo.
 
 **How long it takes** (RTX 4070 Ti SUPER): a 60-page paper ~1.5 min to index plus ~40 min of
 extraction (entities/relations — skip with `--no-extract` and run later); a photo ~15 s; 3 min of

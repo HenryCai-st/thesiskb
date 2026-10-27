@@ -28,7 +28,7 @@ from thesiskb.core.config import PipelineConfig, get_models_config, get_settings
 from thesiskb.core.models import Chunk, Job, Person, Segment, Source, Speaker
 from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
-from thesiskb.ingest.documents import FTS_CONFIG, detect_language, extract_blocks
+from thesiskb.ingest.documents import FTS_CONFIG, detect_language, document_meta, extract_blocks
 from thesiskb.ingest.metadata import arxiv_id_from_name, lookup_arxiv
 from thesiskb.ingest.parsers import (
     ParseContext,
@@ -413,7 +413,9 @@ def _chunk_document(ctx: ParseContext, src: Source, f: DetectedFile, count) -> N
     meta = None
     if ctx.metadata_lookup and (aid := arxiv_id_from_name(f.path.name)):
         meta = lookup_arxiv(aid)
-    src.title = (meta.title if meta else None) or parsed.title or src.title
+    doc_title, doc_authors = document_meta(f.path, src.modality)
+    src.title = (meta.title if meta else None) or parsed.title or doc_title or src.title
+    src.authors = src.authors or doc_authors or None
     if meta:
         src.authors = meta.authors or src.authors
         src.published = meta.published or src.published

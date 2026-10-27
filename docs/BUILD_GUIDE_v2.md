@@ -128,6 +128,8 @@ Part A — URL ingest (do first):
 - `tkb ingest <url>` and an "Add URL" field. Fetch once, store a snapshot (HTML + main text) under `data/raw/web/`, sha256 of the snapshot, locator = URL + anchor, retrieval date recorded.
 - Main text via trafilatura or Docling HTML; [Crawl4AI](https://www.zenrows.com/blog/crawl4ai) only for pages that need JavaScript. Embedded images go through the image path; embedded audio/video only when it is a direct file link (no platform downloaders).
 - Polite fetching: check `robots.txt` with [`urllib.robotparser`](https://docs.python.org/3/library/urllib.robotparser.html), descriptive User-Agent, one request at a time per host with a delay, back off on 429/503.
+- Page clutter: navigation, footers and "more projects" cards must not become chunks (found in M11: the SideBy page's project carousel was retrieved for a SideBy question). Use main-content extraction (trafilatura) for web pages; check with gold question web-01.
+- Videos embedded in a page (`<video src>` on the same site) are downloaded and go through the video path; the M11 saved copy has none of them.
 - Whole-site ingest (`tkb ingest <url> --site`): same host only, `sitemap.xml` first, else follow links; `--max-pages` (default 50). Each page is its own source. No crawling of other hosts.
 
 Part B — web search (only after the legal check):
