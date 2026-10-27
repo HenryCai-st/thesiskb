@@ -88,6 +88,8 @@ class Answer(BaseModel):
     context: list[Citation] = Field(default_factory=list)  # everything shown to the LLM
     timings: dict[str, float] = Field(default_factory=dict)
     route: dict[str, Any] | None = None  # paths chosen by the router and why
+    retrieval: list[dict[str, Any]] = Field(default_factory=list)  # queries sent + hits, per path
+    trace_id: str | None = None  # answer_traces row (tkb trace <id>)
 
     @property
     def cited(self) -> list[Citation]:

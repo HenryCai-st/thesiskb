@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     api_token: str | None = None  # if set, the API/UI/MCP-over-HTTP require this bearer token
     tesseract_cmd: str = "tesseract"
     tessdata_dir: str | None = None  # language packs folder if not the install default
+    public_url: str | None = None  # base for links in chat replies; default: the request's URL
     config_dir: Path = REPO_ROOT / "config"
     # which model setup to use, relative to config_dir: models.yaml (fully local, default) or
     # e.g. examples/models.api.yaml (cloud LLM, local KB)

@@ -73,6 +73,12 @@ th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line);
   border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.why { display: block; font-size: 12.5px; color: var(--muted); margin: 0 0 6px 4px; }
+details.trace { margin-top: 10px; font-size: 13.5px; }
+details.trace summary { cursor: pointer; color: var(--accent); }
+details.trace h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
+details.trace .q { font: 13px var(--mono); overflow-wrap: anywhere; }
+details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left: 14px; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -167,6 +173,7 @@ function renderAnswer(a) {
     const text = s.text.replace(/^\s*([-*•])\s+/, "");
     const flag = FLAGS[s.status] ? `<span class="flag" title="${esc(s.note || "")}">${FLAGS[s.status]}</span>` : "";
     out.push(`<p class="sent ${s.status}" ${bullet ? 'style="margin-left:14px"' : ""}>${bullet ? "• " : ""}${inline(text)}${flag}</p>`);
+    if (FLAGS[s.status] && s.note) out.push(`<span class="why">why: ${esc(s.note)}</span>`);
     for (const p of s.pinpoints || []) {
       const who = p.speaker ? esc(p.speaker) : "on screen";
       const img = p.frame_url ? `<img src="${withToken(p.frame_url)}" alt="keyframe">` : "";
@@ -187,9 +194,37 @@ function renderAnswer(a) {
   const r = a.route || {};
   const t = Object.entries(a.timings || {}).map(([k, v]) => `${k} ${v.toFixed(1)}s`).join(" · ");
   out.push(`<p class="muted" style="margin-top:10px">route: ${esc((r.paths || []).join(" + "))}${r.person ? " (" + esc(r.person) + ")" : ""} · ${esc(t)}</p>`);
+  if (a.trace_id || a.retrieval) out.push(`<details class="trace" id="trace"><summary>Details: queries and retrieved passages</summary><div></div></details>`);
   $("#answer").innerHTML = out.join("");
+  const det = $("#trace");
+  if (det) det.ontoggle = async () => {
+    if (!det.open || det.dataset.loaded) return;
+    det.dataset.loaded = 1;
+    det.querySelector("div").innerHTML = renderTrace(a.retrieval ? a : await api(`/api/traces/${a.trace_id}`));
+  };
   $("#answer").querySelectorAll("[data-n]").forEach((el) =>
     el.onclick = () => openCitation(+el.dataset.n, el.dataset.t ? +el.dataset.t : null));
+}
+
+function renderTrace(tr) {  // what was searched, what came back, what the model saw
+  const r = tr.route || {};
+  const out = [`<h4>Route</h4><div>${esc((r.paths || []).join(" + "))} — by ${esc(r.by || "?")}${r.reason ? ": " + esc(r.reason) : ""}</div>`];
+  out.push("<h4>Queries sent to the database</h4>");
+  for (const q of tr.retrieval || []) {
+    out.push(`<div class="q">[${esc(q.path)}] ${esc(q.query)}</div>`);
+    if (q.candidates) out.push(`<div class="hit">${q.candidates.length} candidates (vector + full-text)</div>`);
+    for (const h of (q.reranked || []).slice(0, 8))
+      out.push(`<div class="hit">${h.score.toFixed(3)} · ${esc(h.file)} · ${esc(h.chunk_id.slice(0, 8))}</div>`);
+    if (q.kept != null) out.push(`<div class="hit">kept ${q.kept} for the answer</div>`);
+  }
+  out.push("<h4>Passages shown to the model</h4>");
+  for (const c of tr.context || [])
+    out.push(`<div class="hit">S${c.n} · ${esc(c.filename)} ${esc(where(c.locator))} · ${esc(c.kind)}</div>`);
+  if (tr.models && Object.keys(tr.models).length)
+    out.push(`<h4>Models</h4><div class="hit">${Object.entries(tr.models).map(([k, v]) => esc(k + "=" + v)).join(" · ")}</div>`);
+  if (tr.id) out.push(`<p class="muted">trace ${esc(tr.id)} · <code>tkb trace ${esc(tr.id.slice(0, 8))}</code></p>`);
+  if (tr.error) out.push(`<h4>Error</h4><pre class="passage">${esc(tr.error)}</pre>`);
+  return out.join("");
 }
 
 function where(loc) {
@@ -288,6 +323,13 @@ async function loadSources() {
 }
 
 api("/api/health").then((h) => $("#status").textContent = "v" + h.version).catch(() => {});
+// "How this answer was found" links from chat clients: /?trace=<id>
+const traceParam = new URLSearchParams(location.search).get("trace");
+if (traceParam) api(`/api/traces/${encodeURIComponent(traceParam)}`).then((tr) => {
+  $("#q").value = tr.question;
+  renderAnswer({ ...tr, text: tr.answer || "", trace_id: tr.id });
+  $("#trace").open = true;
+}).catch((e) => $("#answer").innerHTML = `<p class="sent unsupported">Trace not found: ${esc(e.message)}</p>`);
 </script>
 </body>
 </html>

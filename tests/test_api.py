@@ -37,6 +37,7 @@ def _fake_answer(*args, **kwargs) -> Answer:
         ],
         context=[cite],
         route={"paths": ["person"], "person": "Will.i.am", "by": "rules"},
+        trace_id="t-123",
     )
 
 
@@ -74,8 +75,23 @@ def test_openai_chat_completion_markdown(client):
     d = client.post("/v1/chat/completions", json=body).json()
     content = d["choices"][0]["message"]["content"]
     assert d["object"] == "chat.completion" and d["model"] == "thesiskb"
-    assert "**Sources**" in content and "(/files/src-1#t=20)" in content
+    # absolute links, so chat clients on another host (Open WebUI) can open them
+    assert "**Sources**" in content and "(http://testserver/files/src-1#t=20)" in content
     assert "⚠ Not supported" in content and "time travel" in content
+    assert "(http://testserver/?trace=t-123)" in content
+    assert d["thesiskb"]["trace_id"] == "t-123"
+
+
+def test_public_url_overrides_link_base(client, monkeypatch):
+    monkeypatch.setenv("TKB_PUBLIC_URL", "http://kb.lan:8000/")
+    get_settings.cache_clear()
+    try:
+        body = {"messages": [{"role": "user", "content": "q?"}]}
+        content = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+        assert "(http://kb.lan:8000/files/src-1#t=20)" in content["content"]
+    finally:
+        monkeypatch.delenv("TKB_PUBLIC_URL")
+        get_settings.cache_clear()
 
 
 def test_openai_streaming(client):

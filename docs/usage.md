@@ -95,7 +95,13 @@ Questions in German work too ("Wann ist meine Zwischenpräsentation?").
   with the passage boxed, photos upright, recordings start playing at the quoted second.
 - `↳ S2 at 0:24 Prof. Example` under a sentence is the exact moment it refers to.
 - ⚠ marks a sentence the second check could not match to its cited passage, or one without
-  a citation. Treat it as unverified — open the source.
+  a citation. The line under it ("why: …") is the checker's reason. Treat it as unverified —
+  open the source.
+- **Details** (under the answer) shows how it was found: the route, every query sent to the
+  database (literature questions are split into several), the top hits with scores, the
+  passages the model saw and the models used. In the terminal: `uv run tkb trace last` (or the
+  id printed after `tkb ask`). Chat clients get a "How this answer was found" link to the same
+  view.
 - "The knowledge base does not contain enough evidence to answer this." is a feature: nothing
   relevant was found, so nothing was made up.
 - Answers only cover what you ingested. "State of the art" means *in your library*.
@@ -141,8 +147,17 @@ Open WebUI or any OpenAI client: base URL `http://localhost:8000/v1`, model `the
 uv run tkb doctor        # DB, GPU, Ollama models, cloud keys, ffmpeg, tesseract
 uv run tkb eval          # gold questions (eval/questions.yaml) — run after changing models
 uv run tkb reindex <file>   # re-chunk + re-embed one file from its cached outputs
+uv run tkb trace last    # how the last answer was found (queries, hits, judge reasons)
+uv run tkb report        # zip for a bug report: logs, doctor, versions, config (no secrets)
 docker exec thesiskb-postgres pg_dump -U thesiskb thesiskb > backup.sql   # back up the DB
 ```
+
+Every command and the server write a log to `data/logs/thesiskb.log` (one JSON object per line,
+rotated at 5 MB, 5 files kept). Ingest failures include the file's sha256, the stage and the
+traceback. To report a problem, run `uv run tkb report` (add `--trace` to include the last
+answer) and send the zip from `data/logs/`. Secrets are replaced by `***`; the log does contain
+file names, so look through it first. `.env`, `people.yaml`, your files and chunk text are
+never included.
 
 Add your own gold questions to `eval/questions.yaml` as you go (a question, the file that should
 answer it, a few facts the answer must contain). `tkb eval` then tells you whether a new model or
@@ -159,5 +174,7 @@ setting made things better or worse.
 | No Hugging Face token / CPU only | set `diarization: {backend: none}` in models.yaml (one speaker per file) |
 | Photos read sideways | the vision role must return logprobs (keep it on Ollama `/v1`) |
 | First answer slow (~60 s) | models loading; `tkb serve` keeps them loaded between questions |
-| A sentence flagged ⚠ that looks right | the checker is strict about names/numbers; open the source |
+| A sentence flagged ⚠ that looks right | read its "why:" line and **Details**; the checker is strict about names/numbers; open the source |
+| Source links in Open WebUI don't open | links point at the address the request came to; if Open WebUI reaches ThesisKB under another name, set `TKB_PUBLIC_URL=http://<host>:8000` in `.env`. With `TKB_API_TOKEN` set, files also need `?token=` |
+| Something failed and you need help | `uv run tkb report`, then send the zip from `data/logs/` |
 | Changed models.yaml embedding model | `tkb ingest data/raw --force` (all vectors must be re-made) |

@@ -95,7 +95,7 @@ Goal: one node per real-world thing, and a way to look at the graph.
 
 - **Normalized names.** Entity key = lowercase, Unicode-normalized, hyphens/underscores → spaces, collapsed whitespace. "lake surtan" and "lake-surtan" become one entity. Migration merges existing duplicates.
 - **Candidate merges.** For remaining near-duplicates, compare name embeddings plus shared neighbours ([DEG-RAG](https://arxiv.org/pdf/2510.14271) reports large graph reductions this way). Above a high threshold merge automatically; between thresholds list them as suggestions.
-- **Manage.** `tkb entities merge/rename/alias` and the same actions in the UI. Each change is logged (who, when, before/after) and can be undone. No free-form entity editing beyond merge/rename/alias until users ask for it.
+- ~~Manage (merge/rename/alias UI)~~ — dropped: users do not need to edit entities (section 4). `tkb entities merges` lists automatic merges so a wrong one can be reported.
 - **Graph view.** New "Graph" tab with [Cytoscape.js](https://github.com/cytoscape/js-graph-lib-comparison/blob/master/README.md) (works for hundreds to a few thousand nodes). Search an entity, show its neighbourhood (1–2 hops), click a node to see its sources, click an edge to see the evidence chunk.
 
 Acceptance: no duplicate pairs among the test set's known variants; the graph tab shows an entity's neighbourhood and every edge opens its evidence; `tkb eval` rel-01/rel-02 do not regress.
@@ -127,7 +127,8 @@ Goal: add web pages to the KB, and search the web on request, within the law.
 Part A — URL ingest (do first):
 - `tkb ingest <url>` and an "Add URL" field. Fetch once, store a snapshot (HTML + main text) under `data/raw/web/`, sha256 of the snapshot, locator = URL + anchor, retrieval date recorded.
 - Main text via trafilatura or Docling HTML; [Crawl4AI](https://www.zenrows.com/blog/crawl4ai) only for pages that need JavaScript. Embedded images go through the image path; embedded audio/video only when it is a direct file link (no platform downloaders).
-- Polite fetching: check `robots.txt` with [`urllib.robotparser`](https://docs.python.org/3/library/urllib.robotparser.html), descriptive User-Agent, one request at a time per host with a delay, back off on 429/503. Single pages only, no recursive crawling.
+- Polite fetching: check `robots.txt` with [`urllib.robotparser`](https://docs.python.org/3/library/urllib.robotparser.html), descriptive User-Agent, one request at a time per host with a delay, back off on 429/503.
+- Whole-site ingest (`tkb ingest <url> --site`): same host only, `sitemap.xml` first, else follow links; `--max-pages` (default 50). Each page is its own source. No crawling of other hosts.
 
 Part B — web search (only after the legal check):
 - A `web` route used only when the user asks for it explicitly. Search via self-hosted [SearXNG](https://geekflare.com/guides/brave-search-api-alternatives/) (private) or an API such as Brave or Tavily ([comparison](https://blog.serverworks.co.jp/tavily-vs-brave-search-api-comparison)) — one backend, chosen in an ADR.
@@ -137,6 +138,28 @@ Part B — web search (only after the legal check):
 Acceptance (A): a saved URL ingests and its citation opens the snapshot at the right section. Acceptance (B): defined after the legal check.
 
 ## 4. Open questions (answer before or during the milestone; record as ADRs)
+
+### Answers (user, 2026-10-27)
+
+1. **Legal:** private, non-commercial use outside the EU; GDPR compliance is not required.
+   M17 Part B is no longer gated. Keep the technical safeguards anyway (robots.txt, rate
+   limits, `forget-person`, `unverified` status).
+2. **Granola:** free plan. The CSV holds the AI summary and the transcript of each meeting,
+   ordered by time. M13 ingests the CSV (one unit per meeting row); no API connector.
+3. **Entities:** users do not need to edit entities. M14 keeps automatic merging and the
+   graph view; manual merge/rename/alias is dropped.
+4. **Planning:** plans count holidays as normal days by default; the user can exclude
+   single days or whole weeks.
+5. **Test data:** an EPUB (gold question: "What is the difference between chapter 1 and
+   chapter 2?") and the page <https://www.viviencai.com/projects/sideby>, also saved under
+   `data/raw/` as "SideBy _ Vivien Cai Portfolio" (the saved copy has broken layout, so the
+   live URL is the reference).
+6. **Whole-site ingest:** wanted ("grab all pages of https://www.viviencai.com"). Added to
+   M17 Part A as a bounded same-site crawl: read `sitemap.xml` first, else follow links on
+   the same host only, obey robots.txt, with a page limit (default 50) and delay. Each page
+   becomes its own source.
+
+### Original questions
 
 1. **Legal (M17 B).** The EDPB's draft [Guidelines 03/2026 on web scraping](https://www.edpb.europa.eu/system/files/2026-07/edpb_guidelines_2020603_webscraping_v1_en_0.pdf) say GDPR applies to scraped personal data, public availability alone is not a legal basis, and untargeted scraping is hard to justify ([summary](https://www.skwschwarz.de/en/news/ki-flash-edpb-guidelines-web-scraping-ai)). Background checks on people are profiling. Who is looked up, for what purpose, and on what legal basis? Needs a qualified answer, not ours.
 2. **Granola (M13).** Which Granola plan do users have? Is the CSV (no transcripts) enough?

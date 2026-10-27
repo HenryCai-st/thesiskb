@@ -260,3 +260,27 @@ class EvalRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AnswerTrace(Base):
+    """One row per answered question: what was searched, what the model saw, how it was judged."""
+
+    __tablename__ = "answer_traces"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)  # cli|api|chat|mcp|eval
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text)
+    refused: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    route: Mapped[dict | None] = mapped_column(JSONB)
+    retrieval: Mapped[list | None] = mapped_column(JSONB)  # per path: query, candidates, reranked
+    context: Mapped[list | None] = mapped_column(JSONB)  # passages [S#] shown to the model
+    sentences: Mapped[list | None] = mapped_column(JSONB)  # status + judge reason per claim
+    models: Mapped[dict | None] = mapped_column(JSONB)
+    timings: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (Index("ix_answer_traces_created_at", "created_at"),)

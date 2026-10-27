@@ -18,8 +18,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -53,6 +53,15 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
 
 
 app = FastAPI(title="ThesisKB", version=__version__)
+
+
+@app.exception_handler(Exception)
+async def log_unhandled(request: Request, exc: Exception) -> JSONResponse:
+    """Unexpected errors go to the log file with the request, and back as readable text."""
+    log.error("%s %s failed", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
+
+
 api = Depends(require_token)
 
 
@@ -124,6 +133,10 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/ask", dependencies=[api])
 def ask(req: AskRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    return _ask(req, session, "api")
+
+
+def _ask(req: AskRequest, session: Session, channel: str) -> dict[str, Any]:
     from thesiskb.answer.paths import answer
     from thesiskb.llm import get_gateway
     from thesiskb.retrieval.hybrid import SearchFilters
@@ -138,6 +151,7 @@ def ask(req: AskRequest, session: Session = Depends(get_session)) -> dict[str, A
             filters,
             path=req.path,
             verify_support=req.verify_support,
+            channel=channel,
         )
     out = ans.model_dump(mode="json")
     for c in out["context"]:
@@ -149,6 +163,20 @@ def ask(req: AskRequest, session: Session = Depends(get_session)) -> dict[str, A
             p["open_url"] = f"/files/{src_id}#t={int(p['t'])}" if src_id else None
             if p.get("frame") and src_id:
                 p["frame_url"] = f"/frames/{src_id}/{Path(p['frame']).name}"
+    return out
+
+
+@app.get("/api/traces/{ref}", dependencies=[api])
+def answer_trace(ref: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Queries, hits, passages and judge verdicts of one answer ('last' = most recent)."""
+    from thesiskb.answer.trace import get_trace, trace_out
+
+    t = get_trace(session, ref)
+    if t is None:
+        raise HTTPException(status_code=404, detail="trace not found")
+    out = trace_out(t)
+    for c in out["context"]:
+        c["links"] = citation_links(session, uuid.UUID(c["chunk_id"]))
     return out
 
 
@@ -434,19 +462,25 @@ def render_markdown(ans: dict[str, Any], base_url: str = "") -> str:
             where = locator_label(c["locator"])
             url = base_url + c.get("links", {}).get("open_url", "")
             lines.append(f"- [S{c['n']}] [{c['filename']}, {where}]({url})")
+    if ans.get("trace_id"):
+        lines.append(f"\n[How this answer was found]({base_url}/?trace={ans['trace_id']})")
     return "\n".join(lines)
 
 
 @app.post("/v1/chat/completions", dependencies=[api])
-def chat_completions(body: dict[str, Any], session: Session = Depends(get_session)):
+def chat_completions(
+    body: dict[str, Any], request: Request, session: Session = Depends(get_session)
+):
     messages = body.get("messages") or []
     question = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), None)
     if isinstance(question, list):  # content parts
         question = " ".join(p.get("text", "") for p in question if p.get("type") == "text")
     if not question:
         raise HTTPException(status_code=400, detail="no user message")
-    ans = ask(AskRequest(question=question), session)
-    content = render_markdown(ans, body.get("base_url", ""))
+    ans = _ask(AskRequest(question=question), session, "chat")
+    # absolute links: chat clients (Open WebUI) resolve relative ones against their own host
+    base = get_settings().public_url or body.get("base_url") or str(request.base_url)
+    content = render_markdown(ans, base.rstrip("/"))
     created = int(time.time())
     cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     if body.get("stream"):
@@ -484,7 +518,11 @@ def chat_completions(body: dict[str, Any], session: Session = Depends(get_sessio
             }
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "thesiskb": {"route": ans.get("route"), "date": date.today().isoformat()},
+        "thesiskb": {
+            "route": ans.get("route"),
+            "trace_id": ans.get("trace_id"),
+            "date": date.today().isoformat(),
+        },
     }
 
 

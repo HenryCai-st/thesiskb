@@ -124,7 +124,9 @@ def ask(question: str) -> dict:
     from thesiskb.llm import get_gateway
 
     with _lock, session_scope() as session:
-        ans = answer(session, get_gateway(), question, get_pipeline_config().retrieval)
+        ans = answer(
+            session, get_gateway(), question, get_pipeline_config().retrieval, channel="mcp"
+        )
         return {
             "answer": ans.text,
             "route": ans.route,
@@ -137,11 +139,9 @@ def ask(question: str) -> dict:
 
 
 def main() -> None:
-    import logging
-    import sys
+    from thesiskb.core.logs import setup_logging
 
-    # stdout is the MCP channel: send all logging to stderr
-    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    setup_logging()  # file + stderr; stdout is the MCP channel
     import litellm
 
     litellm.suppress_debug_info = True

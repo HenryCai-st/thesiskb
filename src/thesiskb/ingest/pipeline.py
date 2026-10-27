@@ -368,7 +368,9 @@ def _safe(
     try:
         return run_stage(session, src, stage, fn, force)
     except Exception as e:  # noqa: BLE001
-        log.exception("%s failed for %s", stage, f.path.name)
+        log.exception(
+            "%s failed for %s", stage, f.path.name, extra={"sha256": f.sha256, "stage": stage}
+        )
         msg = f"{stage}: {type(e).__name__}: {e}"
         if "APIConnectionError" in type(e).__name__ or "Connection refused" in str(e):
             msg += (

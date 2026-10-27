@@ -19,6 +19,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_, select
@@ -45,12 +46,38 @@ class Ctx(BaseModel):
     cites: list[Citation] = Field(default_factory=list)
     rules: str = ""
     timings: dict[str, float] = Field(default_factory=dict)
+    retrieval: list[dict[str, Any]] = Field(default_factory=list)  # for the answer trace
 
 
-def _top_hits(session, gateway, query, filters, cfg: RetrievalConfig, k: int | None = None):
+def hit_rows(hits: list[Hit]) -> list[dict[str, Any]]:
+    """Compact hit list for the answer trace."""
+    return [
+        {
+            "chunk_id": str(h.chunk_id),
+            "file": h.filename,
+            "score": round(h.score, 4),
+            "ranks": h.ranks,
+        }
+        for h in hits
+    ]
+
+
+def _top_hits(
+    session, gateway, query, filters, cfg: RetrievalConfig, k: int | None = None, trace=None
+):
     hits = hybrid_search(session, gateway, query, filters, cfg.hybrid_top_k, cfg.rrf_k)
     top = rerank(gateway, query, hits, k or cfg.rerank_top_k)
-    return [h for h in top if h.score >= cfg.min_rerank_score]
+    kept = [h for h in top if h.score >= cfg.min_rerank_score]
+    if trace is not None:
+        trace.append(
+            {
+                "query": query,
+                "candidates": hit_rows(hits),
+                "reranked": hit_rows(top),
+                "kept": len(kept),
+            }
+        )
+    return kept
 
 
 # --- general -------------------------------------------------------------------------------
@@ -58,8 +85,13 @@ def _top_hits(session, gateway, query, filters, cfg: RetrievalConfig, k: int | N
 
 def general_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
     t0 = time.perf_counter()
-    top = _top_hits(session, gateway, question, filters, cfg)
-    return Ctx(cites=hit_citations(top), timings={"search+rerank": time.perf_counter() - t0})
+    trace: list[dict[str, Any]] = []
+    top = _top_hits(session, gateway, question, filters, cfg, trace=trace)
+    return Ctx(
+        cites=hit_citations(top),
+        timings={"search+rerank": time.perf_counter() - t0},
+        retrieval=trace,
+    )
 
 
 # --- literature ----------------------------------------------------------------------------
@@ -151,10 +183,19 @@ def literature_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
         scored.sort(key=lambda x: x[0], reverse=True)
         cites = [c for _, c in scored[: cfg.rerank_top_k]]
     t3 = time.perf_counter()
+    trace = [{"query": q, "candidates": hit_rows(lists[f"q{i}"])} for i, q in enumerate(queries)]
+    trace.append(
+        {
+            "query": f"(fused, reranked on the question; {len(hits)} candidates)",
+            "reranked": hit_rows(top),
+            "kept": len(cites),
+        }
+    )
     return Ctx(
         cites=cites,
         rules=LITERATURE_RULES,
         timings={"sub-queries": t1 - t0, "search+rerank": t2 - t1, "summaries": t3 - t2},
+        retrieval=trace,
     )
 
 
@@ -223,15 +264,17 @@ def person_ctx(session, gateway, question, cfg, filters, route: Route) -> Ctx:
         return Ctx()
     ids = person_chunk_ids(session, person)
     hits = []
+    trace: list[dict[str, Any]] = []
     if ids:
         f = (filters or SearchFilters()).model_copy(update={"chunk_ids": ids})
-        hits = _top_hits(session, gateway, question, f, cfg, k=6)
+        hits = _top_hits(session, gateway, question, f, cfg, k=6, trace=trace)
     # statements first (they carry the attribution), then the person's chunks for context
     cites = statement_citations(session, person) + hit_citations(hits)
     return Ctx(
         cites=cites,
         rules=PERSON_RULES.format(name=person.name),
         timings={"person": time.perf_counter() - t0},
+        retrieval=trace,
     )
 
 
@@ -270,7 +313,14 @@ def entity_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
                 local_only=src.local_only,
             )
         )
-    return Ctx(cites=cites, rules=ENTITY_RULES, timings={"graph": time.perf_counter() - t0})
+    return Ctx(
+        cites=cites,
+        rules=ENTITY_RULES,
+        timings={"graph": time.perf_counter() - t0},
+        retrieval=[
+            {"query": f"entity graph: {question}", "chunks": [str(c.chunk_id) for c in cites]}
+        ],
+    )
 
 
 # --- task ----------------------------------------------------------------------------------
@@ -315,7 +365,22 @@ def answer(
     filters: SearchFilters | None = None,
     path: str = "auto",
     verify_support: bool = True,
+    channel: str = "cli",
 ) -> Answer:
+    """Answer a question and store its trace (answer_traces), also when answering fails."""
+    from thesiskb.answer.trace import save_trace
+
+    state: dict[str, Any] = {}
+    try:
+        ans = _answer(session, gateway, question, cfg, filters, path, verify_support, state)
+    except Exception as e:
+        save_trace(session, gateway, Answer(question=question, text="", **state), channel, error=e)
+        raise
+    ans.trace_id = save_trace(session, gateway, ans, channel)
+    return ans
+
+
+def _answer(session, gateway, question, cfg, filters, path, verify_support, state) -> Answer:
     from thesiskb.answer.verify import verify
 
     t0 = time.perf_counter()
@@ -327,13 +392,17 @@ def answer(
             forced = route_question(session, None, question, use_llm=False)
             route.person, route.person_id = forced.person, forced.person_id
     timings = {"route": time.perf_counter() - t0}
+    retrieval: list[dict[str, Any]] = []
+    state |= {"route": route.model_dump(), "timings": timings, "retrieval": retrieval}
 
     ctxs = []
     for p in route.paths:
         ctx = PROVIDERS[p](session, gateway, question, cfg, filters, route)
         timings |= {f"{p}:{k}": v for k, v in ctx.timings.items()}
+        retrieval += [{"path": p} | r for r in ctx.retrieval]
         ctxs.append(ctx)
     cites = merge(ctxs)
+    state["context"] = cites
     if not cites:
         return Answer(
             question=question,
@@ -342,6 +411,7 @@ def answer(
             refused=True,
             timings=timings,
             route=route.model_dump(),
+            retrieval=retrieval,
         )
     t1 = time.perf_counter()
     rules = "\n".join(c.rules for c in ctxs if c.rules)
@@ -350,4 +420,5 @@ def answer(
     verify(gateway, ans, check_support=verify_support and not ans.refused)
     ans.timings = timings | {"generate": t2 - t1, "verify": time.perf_counter() - t2}
     ans.route = route.model_dump()
+    ans.retrieval = retrieval
     return ans

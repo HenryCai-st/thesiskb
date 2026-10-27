@@ -84,9 +84,9 @@ def run_eval(
         expected = {by_name[n].id for n in names}
         gold_paths = [q.path] if isinstance(q.path, str) else list(q.path)
         if oracle:  # bypass the router: answer with the gold path
-            ans = answer(session, gateway, q.question, cfg, path=gold_paths[0])
+            ans = answer(session, gateway, q.question, cfg, path=gold_paths[0], channel="eval")
         else:
-            ans = answer(session, gateway, q.question, cfg, path="auto")
+            ans = answer(session, gateway, q.question, cfg, path="auto", channel="eval")
         routed = (ans.route or {}).get("paths", [])
         # correct if the gold path is among those the router chose (extra paths cost time, not
         # correctness); "general" gold is also satisfied by any search path

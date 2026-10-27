@@ -90,7 +90,6 @@ def ingest(
     ),
 ) -> None:
     """Ingest documents (PDF/Office), images, audio and video."""
-    import logging
     from collections import Counter
 
     from rich.logging import RichHandler
@@ -104,19 +103,16 @@ def ingest(
     )
 
     from thesiskb.core.db import session_scope
+
+    # logs go through the same console as the progress bars, so they print above them
+    from thesiskb.core.logs import set_console_handler, setup_logging
     from thesiskb.ingest.detect import detect
     from thesiskb.ingest.pipeline import ingest as run_ingest
     from thesiskb.ingest.pipeline import supported_modalities
     from thesiskb.llm import get_gateway
 
-    # logs go through the same console as the progress bars, so they print above them
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(message)s",
-        handlers=[RichHandler(console=console, show_path=False, show_time=False)],
-    )
-    for noisy in ("LiteLLM", "httpx", "docling", "transformers"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging()
+    set_console_handler(RichHandler(console=console, show_path=False, show_time=False))
     cfg = get_pipeline_config()
     modalities = supported_modalities(cfg)  # loads plug-ins (new file types) before detect
     files = detect(paths)
@@ -250,6 +246,62 @@ def ask(
             f"[{ans.route['by']}: {escape(ans.route.get('reason') or '')}][/]"
         )
     console.print(f"[dim]{' · '.join(f'{k} {v:.1f}s' for k, v in t.items())}[/]")
+    if ans.trace_id:
+        console.print(f"[dim]trace: tkb trace {ans.trace_id[:8]}[/]")
+
+
+@app.command()
+def trace(
+    ref: str = typer.Argument("last", help="'last' or a trace id (prefix)"),
+    as_json: bool = typer.Option(False, "--json"),
+    hits: int = typer.Option(5, help="Reranked hits to show per query"),
+) -> None:
+    """Show how a question was answered: queries, hits, passages, judge verdicts."""
+    from thesiskb.answer.trace import format_trace, get_trace, trace_out
+    from thesiskb.core.db import session_scope
+
+    with session_scope() as session:
+        t = get_trace(session, ref)
+        if t is None:
+            console.print(f"[red]No trace found for {escape(ref)}[/]")
+            raise typer.Exit(code=1)
+        out = trace_out(t)
+    if as_json:
+        import json
+        import sys
+
+        sys.stdout.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+        return
+    console.print(escape(format_trace(out, hits)), highlight=False)
+
+
+@app.command()
+def report(
+    out: Path | None = typer.Option(
+        None, help="Zip file to write (default: data/logs/report-*.zip)"
+    ),
+    lines: int = typer.Option(1000, help="Log lines to include"),
+    with_trace: bool = typer.Option(
+        False, "--trace", help="Also include the last answer trace (question, answer, passages)"
+    ),
+) -> None:
+    """Bundle logs, doctor results, versions and config (secrets removed) for a bug report."""
+    from thesiskb.report import build_report, default_report_path
+
+    trace_data = None
+    if with_trace:
+        from thesiskb.answer.trace import get_trace, trace_out
+        from thesiskb.core.db import session_scope
+
+        with session_scope() as session:
+            t = get_trace(session, "last")
+            trace_data = trace_out(t) if t else None
+    path = build_report(out or default_report_path(), lines, trace_data)
+    console.print(f"[green]Report written:[/] {escape(str(path))}")
+    console.print(
+        "[dim]Contains log lines (with file names), doctor results, versions and config; "
+        "secrets are replaced by ***. Look through it before sharing.[/]"
+    )
 
 
 speakers_app = typer.Typer(
@@ -905,6 +957,9 @@ def main() -> None:
     """Entry point of `tkb`: the CLI, with a readable message when the database is down."""
     from sqlalchemy.exc import OperationalError
 
+    from thesiskb.core.logs import setup_logging
+
+    setup_logging()
     try:
         app()
     except OperationalError as e:
