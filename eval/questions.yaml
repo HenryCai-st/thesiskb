@@ -17,6 +17,7 @@ fixtures:
   dgx_audio: "Sparking Something Big_ NVIDIA DGX Spark Has Arrived.mp3"
   sample_epub: minimal.epub                      # "Sample .epub Book": 2 lorem-ipsum chapters + copyright page
   sideby_html: "SideBy _ Vivien Cai Portfolio.html"  # saved page of viviencai.com/projects/sideby
+  voros: Voros-GenericForesightProcess.pdf      # Voros, "A generic foresight process framework" (19 p.)
   granola_csv: granola-export-test.csv           # Granola export: AI summary + transcript per meeting (ingested from M13)
 
 questions:
@@ -195,3 +196,35 @@ questions:
       - Topic - "KI am Arbeitsplatz" (AI at the workplace)
       - Target group - Berufseinsteiger (entry-level / junior workers)
     notes: Skipped until CSV ingest exists (Milestone 13).
+
+  # --- Whole-document questions (Milestone 12: summaries at ingest + summary path) ---
+  - id: sum-01
+    question: Summarize the book for me.
+    type: summary
+    path: summary
+    expected_sources: [sample_epub]
+    expected_facts:
+      - Covers Chapter 1, Chapter 2 and the Copyright page, in order
+      - Both chapters are placeholder (Lorem ipsum) text
+    notes: The user's report - "summarize the book" skipped chapter 2. Coverage must be 3/3 parts.
+
+  - id: sum-02
+    question: Summarize the diffusion models survey.
+    type: summary
+    path: summary
+    expected_sources: [survey]
+    expected_facts:
+      - Foundations - DDPMs, score-based generative models, score SDEs
+      - Efficient sampling, improved likelihood, and data with special structures
+      - Connections with other generative models (VAEs, GANs, normalizing flows, autoregressive, energy-based)
+      - Applications (vision, NLP, multimodal, temporal data, robust learning, interdisciplinary) and future directions
+    notes: 59-page paper, 10 parts; every numbered section should appear.
+
+  - id: sum-03
+    question: What is the Generic Foresight Process paper about?
+    type: summary
+    path: summary
+    expected_sources: [voros]
+    expected_facts:
+      - A generic foresight process framework (inputs, foresight work - analysis, interpretation, prospection - outputs, strategy) used at Swinburne University
+      - Its origins, a staged way of implementing foresight, and its use as a diagnostic and design tool

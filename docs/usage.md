@@ -36,6 +36,9 @@ uv run tkb sources                             # what is in the KB, and each fil
 Source types steer answering: `paper`/`book` feed the literature path, `meeting`/`interview`/`note`
 are scanned for tasks. Defaults: e-books → book, web pages → web, other documents → paper, photos → note, audio → meeting, video → demo.
 
+Every source longer than a page also gets a summary per part and one for the whole source
+(the `summarize` stage, ~10–20 s per part with the local model; cached, so re-runs are free).
+
 **How long it takes** (RTX 4070 Ti SUPER): a 60-page paper ~1.5 min to index plus ~40 min of
 extraction (entities/relations — skip with `--no-extract` and run later); a photo ~15 s; 3 min of
 audio ~20 s; a 2-min video ~1.5 min. Long jobs resume where they stopped if interrupted.
@@ -87,6 +90,7 @@ The router picks the path; you can force one with `--path`:
 | "What does Prof. Example prefer for the evaluation?" | person | only what that person said or wrote |
 | "Show me my thesis schedule", "When is my mid-term?" | task | the tasks table (SQL), sorted by date |
 | "Which datasets appear in my sources?" | entity | the extracted entities/relations tables |
+| "Summarize the book", "What is the meeting about?" | summary | summaries of every part (chapter, section, 10-minute window) written at ingest; the answer says which parts it covered |
 | anything else | general | search over everything |
 
 Questions in German work too ("Wann ist meine Zwischenpräsentation?").

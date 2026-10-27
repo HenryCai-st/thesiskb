@@ -42,7 +42,7 @@ from thesiskb.llm.gateway import LLMGateway
 
 log = logging.getLogger(__name__)
 
-STAGES = ("parse", "chunk", "embed", "extract")
+STAGES = ("parse", "chunk", "summarize", "embed", "extract")
 EMBED_BATCH = 16
 
 
@@ -155,16 +155,30 @@ def ingest(
         work = partial(parser_for(src.modality).chunk, ctx, src, f, count)
         if _safe(report, session, src, f, "chunk", work, force):
             report["chunk"] += 1
-            # new chunks invalidate old embeddings and extractions
+            # new chunks invalidate summaries, embeddings and extractions
             session.execute(
-                delete(Job).where(Job.source_id == src.id, Job.stage.in_(("embed", "extract")))
+                delete(Job).where(
+                    Job.source_id == src.id, Job.stage.in_(("summarize", "embed", "extract"))
+                )
             )
             session.commit()
+
+    # --- summarize (answer-size LLM; per section, then the whole source; cached) ---
+    for src, f in sources:
+        if job_done(session, src, "chunk"):
+            on_part = partial(step, "summarize", f.path.name)
+            work = partial(_summarize_source, session, src, cfg, gateway, on_part)
+            if _safe(report, session, src, f, "summarize", work, force):
+                report["summarize"] += 1
+                # new summary chunks need vectors (extraction skips summaries: keep it)
+                session.execute(delete(Job).where(Job.source_id == src.id, Job.stage == "embed"))
+                session.commit()
+        step("summarize", f.path.name)
 
     # --- embed (Ollama bge-m3) ---
     for src, f in sources:
         step("embed", f.path.name)
-        if not job_done(session, src, "chunk"):
+        if not job_done(session, src, "summarize"):
             continue
         work = partial(_embed_source, session, src, gateway)
         if _safe(report, session, src, f, "embed", work, force):
@@ -223,6 +237,14 @@ def _extract_source(session: Session, src: Source, cfg: PipelineConfig, gateway,
         rep.dropped_no_evidence,
         rep.failed_chunks,
     )
+
+
+def _summarize_source(session: Session, src: Source, cfg: PipelineConfig, gateway, on_part=None):
+    from thesiskb.ingest.summarize import summarize_source
+
+    out = processed_dir(cfg, src.sha256) / "summaries.json"
+    n = summarize_source(session, src, gateway, out, on_part)
+    log.info("summarize %s: %d summary chunks", src.path.rsplit("/", 1)[-1], n)
 
 
 def _parse_documents(ctx: ParseContext, todo) -> None:
@@ -579,6 +601,13 @@ def rechunk(session: Session, src: Source, cfg: PipelineConfig, gateway: LLMGate
         src,
         "chunk",
         partial(parser_for(src.modality).chunk, ctx, src, f, get_token_counter()),
+        force=True,
+    )
+    run_stage(
+        session,
+        src,
+        "summarize",
+        partial(_summarize_source, session, src, cfg, gateway),
         force=True,
     )
     run_stage(session, src, "embed", partial(_embed_source, session, src, gateway), force=True)

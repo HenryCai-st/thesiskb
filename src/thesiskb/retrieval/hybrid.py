@@ -18,6 +18,7 @@ class SearchFilters(BaseModel):
     verified_only: bool = False
     source_ids: list[uuid.UUID] | None = None
     chunk_ids: list[uuid.UUID] | None = None  # e.g. chunks where a given person speaks
+    summaries: bool = False  # True: search only the summary chunks (summary path)
 
 
 class Hit(BaseModel):
@@ -48,6 +49,8 @@ _COLUMNS = """
 
 def _where(filters: SearchFilters) -> tuple[str, dict[str, Any]]:
     clauses, params = [], {}
+    # summary chunks paraphrase whole sections; only the summary path searches them
+    clauses.append("c.locator ? 'summary'" if filters.summaries else "NOT (c.locator ? 'summary')")
     if filters.source_types:
         clauses.append("s.source_type IN :source_types")
         params["source_types"] = filters.source_types

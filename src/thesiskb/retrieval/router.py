@@ -4,6 +4,7 @@
   person      what a known person says/prefers/wrote                      (Q2)
   task        deadlines, schedule, who does what until when — SQL         (Q3)
   general     hybrid search over everything (recordings, notes, ...)
+  summary     overview of one whole source (book, paper, meeting), from ingest-time summaries
 
 High-precision rules run first: a known person's name or alias in the question adds `person`,
 schedule/deadline words add `task`. An LLM call (role `router`, JSON) classifies the rest and may
@@ -22,13 +23,25 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from thesiskb.core.models import Entity, Person, Source, Task
+from thesiskb.core.models import Chunk, Entity, Person, Source, Task
 from thesiskb.llm.gateway import LLMGateway
 
 log = logging.getLogger(__name__)
 
-Path = Literal["literature", "person", "task", "entity", "general"]
-PATHS: tuple[str, ...] = ("literature", "person", "task", "entity", "general")
+Path = Literal["literature", "person", "task", "entity", "general", "summary"]
+PATHS: tuple[str, ...] = ("literature", "person", "task", "entity", "general", "summary")
+
+# "Summarize the book", "Give me an overview of the paper", "What is the meeting about?"
+_DOC = (
+    r"(book|paper|article|document|chapter|report|meeting|recording|talk|video|page|survey|"
+    r"buch|artikel|dokument|besprechung|vortrag)"
+)
+_SUMMARY_WORDS = re.compile(
+    rf"\b(summari[sz]e|summary|overview|recap|main points|key points|gist|zusammenfass\w*|"
+    rf"überblick)\b.{{0,60}}\b{_DOC}\b|\bwhat (is|was) (the|this|that) {_DOC} about\b|"
+    rf"\bfasse\b.{{0,60}}\bzusammen\b",
+    re.I,
+)
 
 # "Which NVIDIA products appear in my sources?", "List all datasets mentioned"
 _ENTITY_WORDS = re.compile(
@@ -71,6 +84,8 @@ of techniques in the literature.
 - task: the user's own deadlines, schedule, milestones, to-dos, who does what until when.
 - entity: lists or aggregations across sources — which products / methods / datasets / people \
 appear, everything connected to X.
+- summary: a summary or overview of one whole source — "summarize the book", "what is the \
+meeting about", "main points of the paper".
 - general: anything else — products, recordings, meetings, notes, demos, facts in any source.
 A question can need more than one path (e.g. "What did Prof. X say about my deadline?" = \
 person + task).
@@ -122,6 +137,8 @@ def rule_route(question: str, people: list[Person]) -> Route:
         paths.append("task")
     if _ENTITY_WORDS.search(question):
         paths.append("entity")
+    if _SUMMARY_WORDS.search(question):
+        paths.append("summary")
     route = Route(paths=paths or ["general"], reason="rules")
     if person:
         route.person, route.person_id = person[1], str(person[0].id)
@@ -154,6 +171,8 @@ def available_paths(session: Session) -> set[str]:
         have.add("person")
     if session.scalar(select(func.count()).select_from(Entity)):
         have.add("entity")
+    if session.scalar(select(func.count()).where(Chunk.locator.has_key("summary"))):
+        have.add("summary")
     return have
 
 
@@ -191,5 +210,9 @@ def route_question(
     # search (comparisons routed to entity alone lost unlinked evidence)
     if "entity" in kept and not {"general", "literature"} & set(kept):
         kept.append("general")
+    # a whole-document question: the part summaries cover it; top-k search would only add a
+    # few similar chunks and crowd the context
+    if "summary" in kept and _SUMMARY_WORDS.search(question):
+        kept = [p for p in kept if p not in ("general", "literature", "entity")]
     route.paths = kept or ["general"]
     return route

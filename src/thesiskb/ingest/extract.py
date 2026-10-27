@@ -306,7 +306,9 @@ def extract_source(
     on_chunk: Callable[[int, int], None] | None = None,
 ) -> ExtractReport:
     fields = fields_for(src)
-    chunks = session.scalars(select(Chunk).where(Chunk.source_id == src.id)).all()
+    chunks = session.scalars(
+        select(Chunk).where(Chunk.source_id == src.id, ~Chunk.locator.has_key("summary"))
+    ).all()  # summaries paraphrase; extracted items need verbatim evidence
     cache: dict[str, dict] = {}
     if cache_path.exists():
         cache = json.loads(cache_path.read_text(encoding="utf-8"))

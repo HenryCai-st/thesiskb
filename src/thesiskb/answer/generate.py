@@ -49,7 +49,7 @@ class Citation(BaseModel):
     locator: dict[str, Any]
     verification_status: str
     text: str  # the evidence the support judge checks against
-    kind: str = "chunk"  # chunk | task | statement
+    kind: str = "chunk"  # chunk | task | statement | entity | summary
     summary: str | None = None  # literature path: question-focused evidence summary
     score: float | None = None
     local_only: bool = False  # from a source that must never reach a cloud model
@@ -98,6 +98,10 @@ class Answer(BaseModel):
 
 
 def locator_label(loc: dict[str, Any]) -> str:
+    if loc.get("summary"):  # "summary of 2 Methods, pp. 3–9"
+        rest = locator_label({k: v for k, v in loc.items() if k not in ("summary", "part")})
+        what = loc.get("part") or loc["summary"]
+        return f"summary of {what}" + (f", {rest}" if rest else "")
     if loc.get("page") is not None:
         p, e = loc["page"], loc.get("page_end")
         return f"p. {p}" if not e or e == p else f"pp. {p}–{e}"

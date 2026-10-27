@@ -136,7 +136,7 @@ def ingest(
         TextColumn("{task.description}"),
     )
     with session_scope() as session, Progress(*columns, console=console) as bar:
-        total = bar.add_task("steps (file x stage)", total=len(supported) * (4 if extract else 3))
+        total = bar.add_task("steps (file x stage)", total=len(supported) * (5 if extract else 4))
         chunks = bar.add_task("", total=1, visible=False)
 
         def fit(text: str) -> str:  # the bar and counts take ~60 columns; cut only the label
@@ -147,8 +147,8 @@ def ingest(
             if done is None:  # a file finished a stage
                 bar.update(total, advance=1, description=fit(f"{stage} ✓ {name}"))
                 bar.update(chunks, visible=False)
-            else:  # extraction, chunk by chunk
-                label = fit(f"extract {name}")
+            else:  # summarize part by part, extract chunk by chunk
+                label = fit(f"{stage} {name}")
                 bar.update(chunks, completed=done, total=of, visible=True, description=label)
 
         report = run_ingest(
@@ -183,7 +183,9 @@ def ask(
     no_verify: bool = typer.Option(False, "--no-verify", help="Skip the LLM support check"),
     show_context: bool = typer.Option(False, help="Also print every retrieved passage"),
     as_json: bool = typer.Option(False, "--json", help="Print the full Answer as JSON"),
-    path: str = typer.Option("auto", help="auto (router) | general | literature | person | task"),
+    path: str = typer.Option(
+        "auto", help="auto (router) | general | literature | person | task | entity | summary"
+    ),
 ) -> None:
     """Answer a question from the knowledge base, with citations."""
     from thesiskb.answer.generate import locator_label
@@ -246,6 +248,10 @@ def ask(
             f"[{ans.route['by']}: {escape(ans.route.get('reason') or '')}][/]"
         )
     console.print(f"[dim]{' · '.join(f'{k} {v:.1f}s' for k, v in t.items())}[/]")
+    for r in ans.retrieval:
+        if cov := r.get("coverage"):
+            missing = f"; not covered: {', '.join(cov['missing'])}" if cov["missing"] else ""
+            console.print(f"[dim]parts covered: {cov['cited']}/{cov['parts']}{escape(missing)}[/]")
     if ans.trace_id:
         console.print(f"[dim]trace: tkb trace {ans.trace_id[:8]}[/]")
 

@@ -100,7 +100,7 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
         <button class="primary" id="go">Ask</button>
         <select id="path" title="Answer path">
           <option value="auto">auto (router)</option><option>general</option>
-          <option>literature</option><option>person</option><option>task</option><option>entity</option>
+          <option>literature</option><option>person</option><option>task</option><option>entity</option><option>summary</option>
         </select>
         <label class="muted"><input type="checkbox" id="verified"> verified sources only</label>
         <span class="muted" id="timer"></span>
@@ -198,6 +198,8 @@ function renderAnswer(a) {
   const r = a.route || {};
   const t = Object.entries(a.timings || {}).map(([k, v]) => `${k} ${v.toFixed(1)}s`).join(" · ");
   out.push(`<p class="muted" style="margin-top:10px">route: ${esc((r.paths || []).join(" + "))}${r.person ? " (" + esc(r.person) + ")" : ""} · ${esc(t)}</p>`);
+  const cov = (a.retrieval || []).map((q) => q.coverage).find(Boolean);
+  if (cov) out.push(`<p class="muted">parts covered: ${cov.cited}/${cov.parts}${cov.missing.length ? " · not covered: " + esc(cov.missing.join(", ")) : ""}</p>`);
   if (a.trace_id || a.retrieval) out.push(`<details class="trace" id="trace"><summary>Details: queries and retrieved passages</summary><div></div></details>`);
   $("#answer").innerHTML = out.join("");
   const det = $("#trace");
@@ -219,6 +221,7 @@ function renderTrace(tr) {  // what was searched, what came back, what the model
     if (q.candidates) out.push(`<div class="hit">${q.candidates.length} candidates (vector + full-text)</div>`);
     for (const h of (q.reranked || []).slice(0, 8))
       out.push(`<div class="hit">${h.score.toFixed(3)} · ${esc(h.file)} · ${esc(h.chunk_id.slice(0, 8))}</div>`);
+    if (q.source) out.push(`<div class="hit">source: ${esc(q.source)} (${(q.parts || []).length} parts)</div>`);
     if (q.kept != null) out.push(`<div class="hit">kept ${q.kept} for the answer</div>`);
   }
   out.push("<h4>Passages shown to the model</h4>");
@@ -232,6 +235,11 @@ function renderTrace(tr) {  // what was searched, what came back, what the model
 }
 
 function where(loc) {
+  if (loc.summary) {
+    const { summary, part, ...rest } = loc;
+    const r = where(rest);
+    return "summary of " + (part || summary) + (r ? ", " + r : "");
+  }
   if (loc.page != null) return loc.page_end && loc.page_end !== loc.page ? `pp. ${loc.page}–${loc.page_end}` : `p. ${loc.page}`;
   if (loc.t_start != null) return `${ts(loc.t_start)}–${ts(loc.t_end ?? loc.t_start)}`;
   if (loc.image) return "image";

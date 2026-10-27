@@ -157,5 +157,5 @@ def test_progress_counts_every_file_and_stage(setup):
             extract=False,
             progress=lambda *a: calls.append(a),
         )
-        assert [c[0] for c in calls] == ["parse", "chunk", "embed"]  # 1 file x 3 stages
+        assert [c[0] for c in calls] == ["parse", "chunk", "summarize", "embed"]  # 1 file x 4
         assert all(c[1] == "fake paper.pdf" for c in calls)

@@ -110,6 +110,12 @@ def format_trace(t: dict[str, Any], hits: int = 5) -> str:
             lines.append(f"      {len(r['candidates'])} candidates (vector + full-text, fused)")
         for h in (r.get("reranked") or [])[:hits]:
             lines.append(f"      {h['score']:.3f}  {h['file']}  {h['chunk_id'][:8]}")
+        if r.get("source"):
+            lines.append(f"      source: {r['source']} ({len(r.get('parts') or [])} parts)")
+        if r.get("coverage"):
+            cov = r["coverage"]
+            missing = ", ".join(cov["missing"]) or "none"
+            lines.append(f"      parts cited: {cov['cited']}/{cov['parts']}; missing: {missing}")
         if r.get("kept") is not None:
             lines.append(f"      kept {r['kept']} for the answer")
     lines += ["", "Passages shown to the model:"]

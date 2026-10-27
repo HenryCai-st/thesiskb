@@ -10,6 +10,7 @@ citation/support checks. Multi-path questions therefore need no special handling
   person      statements extracted for the person + chunks where they speak or that they
               authored, searched with the question
   task        open tasks from SQL, sorted by due date
+  summary     whole-document questions: the source's summary plus every part's summary, in order
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ class Ctx(BaseModel):
     rules: str = ""
     timings: dict[str, float] = Field(default_factory=dict)
     retrieval: list[dict[str, Any]] = Field(default_factory=list)  # for the answer trace
+    keep_all: bool = False  # never truncated by merge() (summary: every part must be shown)
 
 
 def hit_rows(hits: list[Hit]) -> list[dict[str, Any]]:
@@ -214,7 +216,9 @@ def person_chunk_ids(session: Session, person: Person) -> list[uuid.UUID]:
     ).all()
     ids: list[uuid.UUID] = []
     for source_id, label in labels:
-        for c in session.scalars(select(Chunk).where(Chunk.source_id == source_id)):
+        for c in session.scalars(
+            select(Chunk).where(Chunk.source_id == source_id, ~Chunk.locator.has_key("summary"))
+        ):
             if label in (c.locator.get("speakers") or []):
                 ids.append(c.id)
     names = [person.name, *(person.aliases or [])]
@@ -323,6 +327,75 @@ def entity_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
     )
 
 
+# --- summary (whole documents) ------------------------------------------------------------
+
+SUMMARY_RULES = """- The first passage summarises the whole source; the others ("Summary of <part>") \
+summarise its parts, in order. Answer with an overview that covers EVERY part in order: one \
+short paragraph or bullet per part that cites THAT part's own passage, not the whole-source \
+summary (cite the whole-source summary only in the opening sentence). Say how the parts connect. \
+Do not skip a part and add nothing the passages do not say."""
+
+
+def summary_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
+    """Pick the source the question is about (best-matching summary), then show all its parts."""
+    t0 = time.perf_counter()
+    f = (filters or SearchFilters()).model_copy(update={"summaries": True})
+    hits = hybrid_search(session, gateway, question, f, cfg.hybrid_top_k, cfg.rrf_k)
+    top = rerank(gateway, question, hits, 5)
+    if not top:
+        return Ctx(retrieval=[{"query": question, "candidates": hit_rows(hits), "kept": 0}])
+    source_id = top[0].source_id
+    rows = session.scalars(
+        select(Chunk).where(Chunk.source_id == source_id, Chunk.locator.has_key("summary"))
+    ).all()
+    rows = sorted(
+        rows, key=lambda c: (c.locator["summary"] != "document", c.locator.get("index", 0))
+    )
+    src = session.get(Source, source_id)
+    cites = [
+        Citation(
+            n=i,
+            chunk_id=c.id,
+            filename=src.path.rsplit("/", 1)[-1],
+            title=src.title,
+            context_header=c.context_header,
+            locator=c.locator,
+            verification_status=src.verification_status,
+            text=c.text,
+            kind="summary",
+            local_only=src.local_only,
+        )
+        for i, c in enumerate(rows, start=1)
+    ]
+    trace = {
+        "query": question,
+        "candidates": hit_rows(hits),
+        "reranked": hit_rows(top),
+        "source": src.path.rsplit("/", 1)[-1],
+        "parts": [c.locator.get("part") for c in rows if c.locator["summary"] == "section"],
+        "kept": len(cites),
+    }
+    return Ctx(
+        cites=cites,
+        rules=SUMMARY_RULES,
+        timings={"summaries": time.perf_counter() - t0},
+        retrieval=[trace],
+        keep_all=True,
+    )
+
+
+def coverage(ans: Answer) -> dict[str, Any] | None:
+    """Which part summaries the answer cited; None if no part summaries were shown."""
+    parts = [
+        c for c in ans.context if c.kind == "summary" and c.locator.get("summary") == "section"
+    ]
+    if not parts:
+        return None
+    cited = {n for s in ans.sentences for n in s.citations}
+    missing = [c.locator.get("part") for c in parts if c.n not in cited]
+    return {"parts": len(parts), "cited": len(parts) - len(missing), "missing": missing}
+
+
 # --- task ----------------------------------------------------------------------------------
 
 
@@ -339,6 +412,7 @@ PROVIDERS: dict[str, Callable[..., Ctx]] = {
     "person": person_ctx,
     "task": task_ctx,
     "entity": entity_ctx,
+    "summary": summary_ctx,
 }
 
 
@@ -346,9 +420,12 @@ def merge(ctxs: list[Ctx], limit: int = MAX_PASSAGES) -> list[Citation]:
     """Renumber passages from all paths [S1].., dropping exact duplicates, path order kept."""
     seen: set[tuple] = set()
     out: list[Citation] = []
-    per_path = max(3, limit // max(1, len(ctxs)))
-    for ctx in ctxs:
-        for c in ctx.cites[:per_path]:
+    whole = sum(len(c.cites) for c in ctxs if c.keep_all)
+    rest = sum(not c.keep_all for c in ctxs)
+    limit = max(limit, whole + 3 * rest)
+    per_path = max(3, (limit - whole) // max(1, rest))
+    for ctx in sorted(ctxs, key=lambda c: not c.keep_all):  # summaries first
+        for c in ctx.cites if ctx.keep_all else ctx.cites[:per_path]:
             key = (c.chunk_id, c.kind, c.text[:200])
             if key in seen:
                 continue
@@ -420,5 +497,9 @@ def _answer(session, gateway, question, cfg, filters, path, verify_support, stat
     verify(gateway, ans, check_support=verify_support and not ans.refused)
     ans.timings = timings | {"generate": t2 - t1, "verify": time.perf_counter() - t2}
     ans.route = route.model_dump()
+    cov = coverage(ans)
+    for r in retrieval:
+        if r.get("path") == "summary" and cov is not None:
+            r["coverage"] = cov  # parts the answer left out are visible in the trace
     ans.retrieval = retrieval
     return ans
