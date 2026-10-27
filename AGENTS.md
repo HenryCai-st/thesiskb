@@ -1,5 +1,6 @@
 # Rules for coding agents
-- Read BUILD_GUIDE.md first. Work on one milestone at a time; check its acceptance criteria before moving on.
+- Read BUILD_GUIDE.md first (milestones 10+ are in docs/BUILD_GUIDE_v2.md). Work on one milestone at a time; check its acceptance criteria before moving on.
+- Follow docs/coding-guide.md: build only what the milestone lists; no extra features.
 - Python 3.11+, uv, ruff, pytest, type hints, pydantic models at module boundaries.
 - All model calls go through src/thesiskb/llm/ (LiteLLM). Never import a vendor SDK elsewhere.
 - Every pipeline stage must be idempotent, keyed by source sha256, and write outputs to data/processed/<sha256>/.
