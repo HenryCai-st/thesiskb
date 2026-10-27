@@ -102,13 +102,14 @@ def ingest(
         TimeRemainingColumn,
     )
 
-    from thesiskb.core.db import session_scope
+    from thesiskb.core.db import get_engine, session_scope
 
     # logs go through the same console as the progress bars, so they print above them
     from thesiskb.core.logs import set_console_handler, setup_logging
     from thesiskb.ingest.detect import detect
     from thesiskb.ingest.pipeline import ingest as run_ingest
     from thesiskb.ingest.pipeline import supported_modalities
+    from thesiskb.ingest.queue import gpu_lock
     from thesiskb.llm import get_gateway
 
     setup_logging()
@@ -151,18 +152,22 @@ def ingest(
                 label = fit(f"{stage} {name}")
                 bar.update(chunks, completed=done, total=of, visible=True, description=label)
 
-        report = run_ingest(
-            session,
-            supported,
-            cfg,
-            get_gateway(),
-            source_type=source_type,
-            force=force,
-            metadata_lookup=bool((cfg.model_extra or {}).get("metadata_lookup", True)),
-            extract=extract,
-            local_only=local_only,
-            progress=progress,
-        )
+        with gpu_lock(get_engine(), wait=False) as free:
+            if not free:  # the web UI's queue (or another tkb ingest) is using the GPU
+                console.print("[yellow]Another ingest is running; waiting for it to finish…[/]")
+        with gpu_lock(get_engine()):
+            report = run_ingest(
+                session,
+                supported,
+                cfg,
+                get_gateway(),
+                source_type=source_type,
+                force=force,
+                metadata_lookup=bool((cfg.model_extra or {}).get("metadata_lookup", True)),
+                extract=extract,
+                local_only=local_only,
+                progress=progress,
+            )
     console.print()  # end the progress-bar line
     failed = report.pop("failed")
     work = ", ".join(f"{stage}: {n}" for stage, n in report.items())
@@ -780,6 +785,26 @@ def serve(
     uvicorn.run("thesiskb.api.app:app", host=host, port=port, log_level="info")
 
 
+@app.command()
+def worker(
+    once: bool = typer.Option(False, "--once", help="Process the queue, then exit"),
+) -> None:
+    """Process the ingest queue (items added from the web UI/API) without the web server.
+    `tkb serve` already runs a worker; use this on a machine that only ingests."""
+    from rich.logging import RichHandler
+
+    from thesiskb.core.db import get_engine
+    from thesiskb.core.logs import set_console_handler
+    from thesiskb.ingest.queue import work
+
+    set_console_handler(RichHandler(console=console, show_path=False, show_time=True))
+    console.print("Waiting for ingest requests… (Ctrl+C to stop)" if not once else "")
+    try:
+        work(get_engine(), once=once)
+    except KeyboardInterrupt:
+        console.print("stopped")
+
+
 @app.command("mcp")
 def mcp_cmd() -> None:
     """Run the MCP server on stdio (for Claude Desktop/Code and other MCP clients)."""
@@ -819,7 +844,7 @@ def open_chunk(chunk_id: str) -> None:
             console.print(f"[red]No chunk {chunk_id}[/]")
             raise typer.Exit(code=1)
         src = session.get(Source, chunk.source_id)
-        target = Path(src.path)
+        target = Path(src.path.split("#", 1)[0])  # CSV row → the CSV file
         upright = processed_dir(get_pipeline_config(), src.sha256) / "upright.jpg"
         if src.modality == "image" and upright.exists():
             target = upright

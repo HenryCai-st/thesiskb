@@ -25,6 +25,7 @@ not re-process it, and exact duplicates are ingested once.
 | Photo of whiteboard, post-its, handwritten notes | `.jpg` / `.png` / `.heic` | Turned upright, read by the vision model (handwriting) and OCR; post-its become one item each |
 | Meeting / interview recording | `.mp3`, `.wav`, `.m4a` | Transcribed with timestamps, split by speaker |
 | Video (interview, product demo) | `.mp4`, `.mkv`, `.mov` | As audio, plus keyframes described by the vision model |
+| Granola meeting export | `.csv` as exported (AI summary + transcript per meeting) | One source per meeting row; re-exporting a longer CSV only adds the new meetings. E-mail and owner name are not stored |
 
 ```bash
 uv run tkb ingest data/raw                     # everything new
@@ -33,8 +34,18 @@ uv run tkb ingest data/raw/private --local-only   # never sent to a cloud model 
 uv run tkb sources                             # what is in the KB, and each file's stages
 ```
 
+**From the web UI** (Sources tab): type a folder or file path on the server (default
+`data/raw`) and press **Ingest**, or press **re-ingest** next to one source. Requests wait in a
+queue and run one at a time; the panel shows the current stage and file. Questions wait while
+an ingest runs (both need the GPU). Without the web server, `uv run tkb worker` processes the
+queue. `tkb ingest` in a terminal waits if the queue is busy, and vice versa.
+
+**Changed files**: edit a file in place (same path) and ingest again — the new version replaces
+the old one once it is fully processed. Tasks you confirmed or marked done are kept, and
+speaker names carry over.
+
 Source types steer answering: `paper`/`book` feed the literature path, `meeting`/`interview`/`note`
-are scanned for tasks. Defaults: e-books → book, web pages → web, other documents → paper, photos → note, audio → meeting, video → demo.
+are scanned for tasks. Defaults: e-books → book, web pages → web, other documents → paper, photos → note, audio and meeting CSVs → meeting, video → demo.
 
 Every source longer than a page also gets a summary per part and one for the whole source
 (the `summarize` stage, ~10–20 s per part with the local model; cached, so re-runs are free).

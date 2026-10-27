@@ -195,7 +195,7 @@ questions:
       - Start with one concrete use case, apply all methods to it, and abstract to a framework later if possible
       - Topic - "KI am Arbeitsplatz" (AI at the workplace)
       - Target group - Berufseinsteiger (entry-level / junior workers)
-    notes: Skipped until CSV ingest exists (Milestone 13).
+    notes: Granola free-plan CSV export (AI summary + German transcript); one source per row (M13).
 
   # --- Whole-document questions (Milestone 12: summaries at ingest + summary path) ---
   - id: sum-01

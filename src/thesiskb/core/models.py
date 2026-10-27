@@ -56,6 +56,10 @@ class Source(Base):
     local_only: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pipeline_version: Mapped[str | None] = mapped_column(String(32))
+    # a changed file's new version points at the old one until that is retired after ingest
+    replaces: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (Index("ix_sources_source_type", "source_type"),)
 
@@ -284,3 +288,28 @@ class AnswerTrace(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (Index("ix_answer_traces_created_at", "created_at"),)
+
+
+class QueueItem(Base):
+    """One ingest request from the web UI/API, processed one at a time by the worker."""
+
+    __tablename__ = "ingest_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # ingest | reingest
+    paths: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="SET NULL")
+    )
+    options: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="queued")
+    progress: Mapped[dict | None] = mapped_column(JSONB)  # stage, file, steps done/total
+    report: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_ingest_queue_status", "status", "id"),)

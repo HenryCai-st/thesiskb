@@ -14,11 +14,12 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
@@ -52,7 +53,22 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="missing or wrong bearer token")
 
 
-app = FastAPI(title="ThesisKB", version=__version__)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """The ingest queue worker runs inside the server; questions wait while it holds the GPU."""
+    import os
+
+    stop = None
+    if os.environ.get("TKB_NO_WORKER") != "1":
+        from thesiskb.ingest.queue import start_worker_thread
+
+        stop = start_worker_thread(get_engine(), hold=lambda: _answer_lock)
+    yield
+    if stop is not None:
+        stop.set()
+
+
+app = FastAPI(title="ThesisKB", version=__version__, lifespan=lifespan)
 
 
 @app.exception_handler(Exception)
@@ -192,30 +208,54 @@ def answer_trace(ref: str, session: Session = Depends(get_session)) -> dict[str,
 
 
 @app.post("/api/ingest", dependencies=[api])
-def ingest(req: IngestRequest, background: BackgroundTasks) -> dict[str, Any]:
-    paths = [Path(p) for p in req.paths]
-    missing = [str(p) for p in paths if not p.exists()]
+def ingest(req: IngestRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Queue an ingest of files/folders on the server; the worker runs one item at a time."""
+    from thesiskb.ingest.queue import enqueue
+
+    missing = [p for p in req.paths if not Path(p).exists()]
     if missing:
-        raise HTTPException(status_code=400, detail=f"not found: {missing}")
-    background.add_task(_run_ingest, paths, req.source_type, req.extract)
-    return {"started": True, "paths": req.paths, "status_url": "/api/sources"}
+        raise HTTPException(status_code=400, detail=f"not found on the server: {missing}")
+    item = enqueue(
+        session, "ingest", [str(Path(p)) for p in req.paths],
+        source_type=req.source_type, extract=req.extract,
+    )  # fmt: skip
+    return {"queued": item.id, "status_url": "/api/jobs"}
 
 
-def _run_ingest(paths: list[Path], source_type: str | None, extract: bool) -> None:
-    from thesiskb.core.db import session_scope
-    from thesiskb.ingest.detect import detect
-    from thesiskb.ingest.pipeline import ingest as run_ingest
-    from thesiskb.ingest.pipeline import supported_modalities
-    from thesiskb.llm import get_gateway
+@app.post("/api/sources/{source_id}/reingest", dependencies=[api])
+def reingest(source_id: uuid.UUID, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Queue a re-run of every stage for one source (a changed file becomes its new version)."""
+    from thesiskb.ingest.queue import enqueue
 
-    cfg = get_pipeline_config()
-    modalities = supported_modalities(cfg)
-    files = [f for f in detect(paths) if f.modality in modalities]
-    with _answer_lock, session_scope() as session:  # GPU: no questions while ingesting
-        report = run_ingest(
-            session, files, cfg, get_gateway(), source_type=source_type, extract=extract
-        )
-    log.info("ingest finished: %s", report)
+    src = session.get(Source, source_id)
+    if src is None:
+        raise HTTPException(status_code=404)
+    item = enqueue(session, "reingest", [src.path], source_id=src.id)
+    return {"queued": item.id, "status_url": "/api/jobs"}
+
+
+@app.get("/api/jobs", dependencies=[api])
+def jobs(limit: int = 20, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    """Recent queue items, newest first, with progress for the running one."""
+    from thesiskb.core.models import QueueItem
+
+    rows = session.scalars(select(QueueItem).order_by(QueueItem.id.desc()).limit(limit))
+    return [
+        {
+            "id": q.id,
+            "kind": q.kind,
+            "paths": q.paths,
+            "source_id": str(q.source_id) if q.source_id else None,
+            "status": q.status,
+            "progress": q.progress,
+            "report": q.report,
+            "error": q.error,
+            "created_at": q.created_at.isoformat() if q.created_at else None,
+            "started_at": q.started_at.isoformat() if q.started_at else None,
+            "finished_at": q.finished_at.isoformat() if q.finished_at else None,
+        }
+        for q in rows
+    ]
 
 
 @app.get("/api/sources", dependencies=[api])
@@ -362,7 +402,7 @@ def file(
     s = session.get(Source, source_id)
     if s is None:
         raise HTTPException(status_code=404)
-    path = Path(s.path)
+    path = Path(s.path.split("#", 1)[0])  # "<file>.csv#<row>": one row of a meeting CSV
     if upright and s.modality == "image":
         candidate = processed_dir(get_pipeline_config(), s.sha256) / "upright.jpg"
         path = candidate if candidate.exists() else path

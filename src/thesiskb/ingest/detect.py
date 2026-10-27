@@ -2,7 +2,11 @@
 
 Original files are never renamed or copied: the `sources` table is the index from content hash
 (sha256) to the file's current path. Moving or renaming a file keeps its sha256, so re-ingesting
-only updates `path`.
+only updates `path`. A file that changed at the same path is a new source that `replaces` the
+old one; the old one is retired once the new one is ingested (pipeline.retire_replaced).
+
+Meeting exports in CSV (Granola) are split into one unit per row: each row has its own sha256
+and the path "<file>.csv#<row id>", so a grown CSV only ingests its new rows.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ MODALITY_BY_SUFFIX = {
     ".mkv": "video",
     ".mov": "video",
     ".webm": "video",
+    ".csv": "meeting_csv",
 }
 
 DOCUMENT_MODALITIES = {"pdf", "epub", "document"}
@@ -49,6 +54,16 @@ class DetectedFile(BaseModel):
     path: Path
     sha256: str
     modality: str
+    unit: str | None = None  # row id inside a multi-unit file (meeting CSV)
+
+    @property
+    def source_path(self) -> str:
+        """`sources.path`: the file, plus "#<unit>" for one row of a CSV."""
+        return self.path.as_posix() + (f"#{self.unit}" if self.unit else "")
+
+    @property
+    def name(self) -> str:
+        return self.path.name + (f"#{self.unit[:8]}" if self.unit else "")
 
 
 def sha256_file(path: Path, bufsize: int = 1 << 20) -> str:
@@ -89,6 +104,17 @@ def detect(paths: Iterable[Path]) -> list[DetectedFile]:
     """Hash and classify files, dropping exact duplicates (same content, different path)."""
     seen: dict[str, DetectedFile] = {}
     for path in iter_input_files(paths):
+        if detect_modality(path) == "meeting_csv":
+            from thesiskb.ingest.meetings_csv import csv_units
+
+            for unit, sha in csv_units(path):  # [] if the CSV is not a known meeting export
+                seen.setdefault(
+                    sha,
+                    DetectedFile(
+                        path=path.resolve(), sha256=sha, modality="meeting_csv", unit=unit
+                    ),
+                )
+            continue
         sha = sha256_file(path)
         if sha not in seen:
             seen[sha] = DetectedFile(
@@ -104,7 +130,9 @@ def default_source_type(f: DetectedFile) -> str | None:
         return "web"
     if f.modality in DOCUMENT_MODALITIES:
         return "paper"
-    return {"image": "note", "audio": "meeting", "video": "demo"}.get(f.modality)
+    return {"image": "note", "audio": "meeting", "video": "demo", "meeting_csv": "meeting"}.get(
+        f.modality
+    )
 
 
 def register(
@@ -112,15 +140,25 @@ def register(
 ) -> Source:
     """Insert or refresh the `sources` row for a file. Returns the (possibly existing) row."""
     src = session.scalar(select(Source).where(Source.sha256 == f.sha256))
-    path = f.path.as_posix()
+    path = f.source_path
     if src is None:
+        # same path, other content: the file changed — the new source replaces the old one
+        previous = session.scalar(
+            select(Source)
+            .where(Source.path == path)
+            .order_by(Source.ingested_at.desc().nullslast())
+        )
         src = Source(
             sha256=f.sha256,
             path=path,
             modality=f.modality,
-            source_type=source_type or default_source_type(f),
+            source_type=source_type
+            or (previous.source_type if previous else None)
+            or default_source_type(f),
             title=f.path.stem,
-            local_only=local_only,
+            local_only=local_only or bool(previous and previous.local_only),
+            verification_status=previous.verification_status if previous else "unverified",
+            replaces=previous.id if previous else None,
         )
         session.add(src)
         session.flush()

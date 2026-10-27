@@ -67,7 +67,8 @@ button.primary:disabled { opacity: .5; cursor: wait; }
 pre.passage { white-space: pre-wrap; font: 13px/1.5 var(--mono); background: var(--bg);
   border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 40vh; overflow: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top;
+  overflow-wrap: anywhere; }
 th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
 .tag { font-size: 12px; padding: 1px 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line);
@@ -114,7 +115,13 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
     </div>
 
     <div class="card hidden" id="tab-sources">
-      <table><thead><tr><th>File</th><th>Type</th><th>Chunks</th><th>Stages</th></tr></thead>
+      <div class="row" style="margin-top:0">
+        <input id="ingest-path" value="data/raw" title="File or folder on the server" style="flex:1;min-width:180px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text)">
+        <button class="primary" id="ingest-go">Ingest</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0">New and changed files in that folder are added; unchanged ones are skipped. A changed file replaces its old version (confirmed tasks are kept).</p>
+      <div id="queue" style="margin:12px 0"></div>
+      <table><thead><tr><th>File</th><th>Type</th><th>Chunks</th><th>Stages</th><th></th></tr></thead>
         <tbody id="sources"></tbody></table>
     </div>
   </section>
@@ -327,15 +334,51 @@ async function loadTasks() {
     e.preventDefault(); const ch = await api(`/api/chunks/${a.dataset.chunk}`); showChunk(ch, ch.locator.t_start); });
 }
 
-// --- sources ---
+// --- sources and the ingest queue ---
 async function loadSources() {
   const rows = await api("/api/sources");
   $("#sources").innerHTML = rows.map((s) => `<tr>
     <td><a href="${withToken(s.file_url)}" target="_blank" class="name">${esc(s.filename)}</a>
       <div class="muted">${esc(s.title && s.title !== s.filename ? s.title : "")}</div></td>
     <td>${esc(s.modality)} · ${esc(s.source_type ?? "")}</td><td>${s.chunks}</td>
-    <td class="muted">${Object.entries(s.stages).map(([k, v]) => `${k}:${v}`).join(" ")}</td></tr>`).join("");
+    <td class="muted">${Object.entries(s.stages).map(([k, v]) => `${k}:${v}`).join(" ")}</td>
+    <td><button class="small" data-reingest="${s.id}" title="Run every stage again for this source">re-ingest</button></td></tr>`).join("");
+  $("#sources").querySelectorAll("[data-reingest]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    await api(`/api/sources/${b.dataset.reingest}/reingest`, { method: "POST" });
+    loadQueue();
+  });
+  loadQueue();
 }
+
+let queueTimer = null, queueActive = false;
+async function loadQueue() {
+  const items = await api("/api/jobs?limit=8");
+  const label = (q) => q.kind === "reingest" ? "re-ingest " + (q.paths[0] || "").split("/").pop() : "ingest " + q.paths.join(", ");
+  $("#queue").innerHTML = items.length ? '<div class="muted">Ingest queue (one at a time; questions wait while it runs)</div>' + items.map((q) => {
+    const p = q.progress || {};
+    const pct = p.total ? Math.round(100 * p.steps / p.total) : 0;
+    const now = q.status === "running"
+      ? `${pct}% · ${esc(p.stage || "starting")} ${esc(p.file || "")}${p.of ? ` (${p.done}/${p.of})` : ""}`
+      : q.status === "done" && q.report ? Object.entries(q.report).filter(([k, v]) => typeof v === "number" && v && k !== "files").map(([k, v]) => `${k}: ${v}`).join(" · ") || "nothing new"
+      : q.error ? esc(q.error.slice(0, 160)) : "";
+    return `<div class="src" style="cursor:default"><span class="tag">${esc(q.status)}</span>
+      <span><span class="name">${esc(label(q))}</span> <span class="muted">${now}</span></span></div>`;
+  }).join("") : "";
+  const active = items.some((q) => q.status === "queued" || q.status === "running");
+  clearTimeout(queueTimer);
+  if (active) queueTimer = setTimeout(loadQueue, 2000);  // poll while something runs
+  else if (queueActive) loadSources();  // just finished: refresh the table
+  queueActive = active;
+}
+
+$("#ingest-go").onclick = async () => {
+  const path = $("#ingest-path").value.trim();
+  if (!path) return;
+  try { await api("/api/ingest", { method: "POST", body: JSON.stringify({ paths: [path] }) }); }
+  catch (e) { alert(e.message); }
+  loadQueue();
+};
 
 api("/api/health").then((h) => $("#status").textContent = "v" + h.version).catch(() => {});
 // "How this answer was found" links from chat clients: /?trace=<id>

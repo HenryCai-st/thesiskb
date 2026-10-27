@@ -25,7 +25,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from thesiskb.core.config import PipelineConfig, get_models_config, get_settings
-from thesiskb.core.models import Chunk, Job, Person, Segment, Source, Speaker
+from thesiskb.core.models import Chunk, Job, Person, Segment, Source, Speaker, Task
 from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
 from thesiskb.ingest.documents import FTS_CONFIG, detect_language, document_meta, extract_blocks
@@ -134,11 +134,11 @@ def ingest(
         if force:
             pass
         elif job_done(session, s, "parse"):
-            step("parse", f.path.name)
+            step("parse", f.name)
             continue
         elif parse_output(cfg, s).exists():
             run_stage(session, s, "parse", lambda: None)  # output cached on disk; no GPU work
-            step("parse", f.path.name)
+            step("parse", f.name)
             continue
         parser = parser_for(s.modality)
         parsers[parser.name] = parser
@@ -149,7 +149,7 @@ def ingest(
     # --- chunk (CPU) ---
     count = get_token_counter()
     for src, f in sources:
-        step("chunk", f.path.name)
+        step("chunk", f.name)
         if not job_done(session, src, "parse"):
             continue
         work = partial(parser_for(src.modality).chunk, ctx, src, f, count)
@@ -166,18 +166,18 @@ def ingest(
     # --- summarize (answer-size LLM; per section, then the whole source; cached) ---
     for src, f in sources:
         if job_done(session, src, "chunk"):
-            on_part = partial(step, "summarize", f.path.name)
+            on_part = partial(step, "summarize", f.name)
             work = partial(_summarize_source, session, src, cfg, gateway, on_part)
             if _safe(report, session, src, f, "summarize", work, force):
                 report["summarize"] += 1
                 # new summary chunks need vectors (extraction skips summaries: keep it)
                 session.execute(delete(Job).where(Job.source_id == src.id, Job.stage == "embed"))
                 session.commit()
-        step("summarize", f.path.name)
+        step("summarize", f.name)
 
     # --- embed (Ollama bge-m3) ---
     for src, f in sources:
-        step("embed", f.path.name)
+        step("embed", f.name)
         if not job_done(session, src, "summarize"):
             continue
         work = partial(_embed_source, session, src, gateway)
@@ -188,12 +188,61 @@ def ingest(
     if extract:
         for src, f in sources:
             if job_done(session, src, "embed"):
-                on_chunk = partial(step, "extract", f.path.name)
+                on_chunk = partial(step, "extract", f.name)
                 work = partial(_extract_source, session, src, cfg, gateway, on_chunk)
                 if _safe(report, session, src, f, "extract", work, force):
                     report["extract"] += 1
-            step("extract", f.path.name)
+            step("extract", f.name)
+
+    # --- changed files: the new version is complete, so the old one can go ---
+    for src, _f in sources:
+        if src.replaces and job_done(session, src, "extract" if extract else "embed"):
+            retire_replaced(session, src, cfg)
     return report
+
+
+def retire_replaced(session: Session, src: Source, cfg: PipelineConfig) -> int:
+    """Delete older sources at the same path as `src`, keeping the user's work: confirmed or
+    finished tasks are matched to the new version's tasks (or moved over), speaker names are
+    copied to the same diarization labels. Returns the number of sources retired."""
+    import shutil
+
+    olds = session.scalars(select(Source).where(Source.path == src.path, Source.id != src.id)).all()
+    if not olds:
+        return 0
+    new_tasks = {_task_key(t.description): t for t in session.scalars(
+        select(Task).where(Task.source_id == src.id)
+    )}  # fmt: skip
+    new_speakers = {
+        s.diarization_label: s
+        for s in session.scalars(select(Speaker).where(Speaker.source_id == src.id))
+    }
+    for old in olds:
+        for t in session.scalars(select(Task).where(Task.source_id == old.id)):
+            if not (t.confirmed or t.status != "open"):
+                continue  # unreviewed extraction: the new version's extraction replaces it
+            match = new_tasks.get(_task_key(t.description))
+            if match:
+                match.confirmed, match.status = t.confirmed, t.status
+                match.owner_person_id = match.owner_person_id or t.owner_person_id
+                session.delete(t)
+            else:  # no longer in the file, but the user confirmed it: never lose it
+                t.source_id, t.source_chunk_id = src.id, None
+        for sp in session.scalars(select(Speaker).where(Speaker.source_id == old.id)):
+            new = new_speakers.get(sp.diarization_label)
+            if sp.person_id and new is not None and new.person_id is None:
+                new.person_id = sp.person_id
+        session.flush()
+        log.info("retire old version of %s (%s)", src.path.rsplit("/", 1)[-1], old.sha256[:12])
+        session.delete(old)
+        shutil.rmtree(processed_dir(cfg, old.sha256), ignore_errors=True)
+    src.replaces = None
+    session.commit()
+    return len(olds)
+
+
+def _task_key(description: str) -> str:
+    return " ".join(description.lower().split()).strip(" .")
 
 
 def _context(
@@ -205,7 +254,7 @@ def _context(
         ok = _safe(report, session, src, f, "parse", fn, force=True)
         if ok:
             report["parse"] = report.get("parse", 0) + 1
-        step("parse", f.path.name)
+        step("parse", f.name)
         return ok
 
     return ParseContext(
@@ -399,7 +448,7 @@ def _safe(
                 f" — Ollama not reachable at {get_settings().ollama_base_url}; start the "
                 "Ollama app, then re-run (finished stages are skipped)"
             )
-        report["failed"].append((f.path.name, msg))
+        report["failed"].append((f.name, msg))
         return False
 
 
@@ -594,7 +643,10 @@ def _chunk_av(ctx: ParseContext, src: Source, f: DetectedFile, count) -> None:
 
 def rechunk(session: Session, src: Source, cfg: PipelineConfig, gateway: LLMGateway) -> None:
     """Redo chunk + embed for one source (e.g. after speaker labels changed)."""
-    f = DetectedFile(path=Path(src.path), sha256=src.sha256, modality=src.modality)
+    file_path, _, unit = src.path.partition("#")  # "#<row>" for one row of a meeting CSV
+    f = DetectedFile(
+        path=Path(file_path), sha256=src.sha256, modality=src.modality, unit=unit or None
+    )
     ctx = ParseContext(session=session, cfg=cfg, gateway=gateway, metadata_lookup=False)
     run_stage(
         session,
@@ -699,5 +751,29 @@ class AudioVideoParser(Parser):
         _chunk_av(ctx, src, f, count)
 
 
-for _parser in (DocumentParser(), ImageParser(), AudioVideoParser()):
+class MeetingCsvParser(Parser):
+    """Rows of a meeting export (Granola CSV): AI summary + transcript per meeting."""
+
+    name = "meeting_csv"
+    modalities = frozenset({"meeting_csv"})
+    output = "meeting.json"
+
+    def parse(self, ctx, items):
+        from thesiskb.ingest.meetings_csv import write_meeting
+
+        for src, f in items:  # CPU only: reading one CSV row
+            ctx.mark(src, f, partial(write_meeting, f.path, f.unit, ctx.out_dir(src) / self.output))
+
+    def chunk(self, ctx, src, f, count):
+        from thesiskb.ingest.meetings_csv import meeting_blocks, meeting_date, meeting_title
+
+        data = json.loads((ctx.out_dir(src) / self.output).read_text(encoding="utf-8"))
+        src.title = meeting_title(data)
+        src.published = meeting_date(data)
+        src.origin = "Granola export"
+        write_blocks(ctx, src, meeting_blocks(data), count)
+        src.ingested_at = _now()
+
+
+for _parser in (DocumentParser(), ImageParser(), AudioVideoParser(), MeetingCsvParser()):
     register_parser(_parser)

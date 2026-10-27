@@ -55,8 +55,12 @@ def load_gold(path: Path) -> tuple[dict[str, str], list[GoldQuestion]]:
     return data.get("fixtures", {}), [GoldQuestion(**q) for q in data["questions"]]
 
 
-def _source_by_filename(session: Session) -> dict[str, Source]:
-    return {s.path.rsplit("/", 1)[-1]: s for s in session.scalars(select(Source))}
+def _source_by_filename(session: Session) -> dict[str, list[Source]]:
+    """File name → its sources (several for a meeting CSV: one per row, path "<file>#<row>")."""
+    out: dict[str, list[Source]] = {}
+    for s in session.scalars(select(Source)):
+        out.setdefault(s.path.split("#", 1)[0].rsplit("/", 1)[-1], []).append(s)
+    return out
 
 
 def run_eval(
@@ -81,7 +85,7 @@ def run_eval(
                 QuestionResult(id=q.id, type=q.type, status="skipped", reason="not ingested")
             )
             continue
-        expected = {by_name[n].id for n in names}
+        expected = {s.id for n in names for s in by_name[n]}
         gold_paths = [q.path] if isinstance(q.path, str) else list(q.path)
         try:  # one model failure (e.g. Ollama aborting a repetition loop) must not end the run
             ans = answer(
@@ -205,7 +209,7 @@ def task_metrics(session: Session, fixtures, questions, by_name) -> dict[str, An
         names = [fixtures.get(s, s) for s in q.expected_sources]
         if not rows or not all(n in by_name for n in names):
             continue
-        src_ids = [by_name[n].id for n in names]
+        src_ids = [s.id for n in names for s in by_name[n]]
         tasks = session.scalars(select(Task).where(Task.source_id.in_(src_ids))).all()
         for row in rows:
             total += 1
