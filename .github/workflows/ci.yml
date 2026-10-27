@@ -14,6 +14,7 @@ jobs:
   test:
     name: lint + unit tests (models mocked)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -36,6 +37,7 @@ jobs:
   integration:
     name: integration (1-page PDF + 10 s speech, real parsers on CPU)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: test
     services:
       postgres:
