@@ -107,6 +107,7 @@ class Transcriber:
             import torch  # noqa: F401
         from faster_whisper import WhisperModel
 
+        self.model_name = model
         try:
             self._model = WhisperModel(model, device="cuda", compute_type=compute_type)
         except (RuntimeError, ValueError) as e:  # no CUDA: slow but works (CI, laptops)
@@ -127,6 +128,7 @@ class Transcriber:
             for w in (seg.words or [])
         ]
         data = {
+            "model": self.model_name,  # which speech model made this transcript (Models tab)
             "language": info.language,
             "duration": round(len(audio) / SAMPLE_RATE, 2),
             "words": words,

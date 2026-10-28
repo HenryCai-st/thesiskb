@@ -223,6 +223,27 @@ Open WebUI or any OpenAI client: base URL `http://localhost:8000/v1`, model `the
   index; delete the original files yourself.
 - Never commit `data/`, `.env` or recordings; the repo's `.gitignore` already excludes them.
 
+### Choosing models
+
+The web UI's **Models** tab lists, per component (answer LLM, vision, embeddings, reranker, OCR,
+speech recognition, speaker separation), the models ThesisKB supports, with download size,
+approximate VRAM, licence and whether each is installed. **Use** downloads it if needed (with
+progress) and switches to it; downloads wait in the ingest queue and run one at a time. The
+choice is written to `config/models.yaml` (OCR languages: `pipeline.yaml`), so `git diff`
+shows what you changed; the options themselves are in `config/model_catalog.yaml`.
+
+- The answer LLM also does citation checks, routing and extraction (one LLM in VRAM).
+- Changing the **embedding** model re-embeds every chunk; the tab asks first.
+- A new **speech** model is used for the next audio/video you ingest; existing transcripts stay.
+- **Online answer models** (Claude) need an API key: paste it under *API keys* and press Save.
+  It is written to `.env` on the server and never shown again (only "set" / "not set"). Keys
+  can only be set from the computer running `tkb serve`, with the server on localhost. With an
+  online answer model, the passages of every question go to the provider; sources marked
+  local-only keep using the local model. Embeddings, reranking, vision and speech always stay
+  local.
+- Gated pyannote models need `TKB_HF_TOKEN` (also settable there) and accepted terms on
+  huggingface.co.
+
 ## 7. Keeping it healthy
 
 ```bash
@@ -259,4 +280,4 @@ setting made things better or worse.
 | A sentence flagged ⚠ that looks right | read its "why:" line and **Details**; the checker is strict about names/numbers; open the source |
 | Source links in Open WebUI don't open | links point at the address the request came to; if Open WebUI reaches ThesisKB under another name, set `TKB_PUBLIC_URL=http://<host>:8000` in `.env`. With `TKB_API_TOKEN` set, files also need `?token=` |
 | Something failed and you need help | `uv run tkb report`, then send the zip from `data/logs/` |
-| Changed models.yaml embedding model | `tkb ingest data/raw --force` (all vectors must be re-made) |
+| Changed models.yaml embedding model by hand | `tkb ingest data/raw --force` (all vectors must be re-made); the Models tab does this for you |

@@ -1,0 +1,250 @@
+# Models the web UI's Models tab offers (Milestone 16, ADR 0017). Curated by hand: only models
+# the code supports and that fit a 16 GB GPU. Sizes are download sizes, VRAM is approximate.
+#
+# component:
+#   roles:   the models.yaml roles an option sets (`model`, `backend`, `vram_gb`, ...)
+#   pipeline: instead of roles, the pipeline.yaml keys it sets (OCR)
+#   options:
+#     id, label, model, local (false = online, needs `env_key`), size_gb, vram_gb, licence,
+#     download: {ollama: <name>} | {hf: <repo>, check: <file in the repo>, gated: true}
+#     set: extra keys written to each role; params: replaces `answer`'s params
+#
+# Online options exist only for the answer LLM: it is the one role with a local fallback
+# (`answer_local`) for local-only sources. Embeddings, reranking, vision and speech stay local.
+# Embedding models must have 1024 dimensions (the database column).
+
+components:
+  answer:
+    label: Answer LLM
+    help: Writes answers. Also used for checking citations, routing and extraction (same weights, so only one LLM is in VRAM).
+    roles: [answer, judge, router, extraction]
+    options:
+      - id: qwen3-14b
+        label: Qwen3 14B
+        model: ollama_chat/qwen3:14b
+        local: true
+        download: {ollama: "qwen3:14b"}
+        size_gb: 9.3
+        vram_gb: 12
+        licence: Apache-2.0
+        params: {temperature: 0.2, num_ctx: 12288, max_tokens: 4096}
+      - id: qwen3-8b
+        label: Qwen3 8B
+        model: ollama_chat/qwen3:8b
+        local: true
+        download: {ollama: "qwen3:8b"}
+        size_gb: 5.2
+        vram_gb: 8
+        licence: Apache-2.0
+        note: Faster, a bit weaker at long answers.
+        params: {temperature: 0.2, num_ctx: 12288, max_tokens: 4096}
+      - id: deepseek-r1-7b
+        label: DeepSeek-R1 7B
+        model: ollama_chat/deepseek-r1:7b
+        local: true
+        download: {ollama: "deepseek-r1:7b"}
+        size_gb: 4.7
+        vram_gb: 7
+        licence: MIT
+        note: Not recommended — in tkb eval (2026-10-28) it rarely cited its sources (citation hit rate 0.06 vs 1.0 for Qwen3 14B).
+        params: {temperature: 0.2, num_ctx: 12288, max_tokens: 4096}
+      - id: claude-sonnet
+        label: Claude Sonnet 5.5 (online)
+        model: anthropic/claude-sonnet-5-5
+        local: false
+        env_key: ANTHROPIC_API_KEY
+        licence: Anthropic API terms
+        note: Retrieved passages are sent to Anthropic. Local-only sources still use the local model.
+        params: {temperature: 0.2, max_tokens: 4096}
+      - id: claude-haiku
+        label: Claude Haiku 5.5 (online)
+        model: anthropic/claude-haiku-5-5
+        local: false
+        env_key: ANTHROPIC_API_KEY
+        licence: Anthropic API terms
+        note: Retrieved passages are sent to Anthropic. Local-only sources still use the local model.
+        params: {temperature: 0.2, max_tokens: 4096}
+
+  vision:
+    label: Vision (photos, keyframes)
+    help: Reads photos and describes video keyframes. Served by Ollama's OpenAI-compatible endpoint (token logprobs find the upright rotation).
+    roles: [vision]
+    options:
+      - id: qwen2.5vl-7b
+        label: Qwen2.5-VL 7B
+        model: openai/qwen2.5vl:7b
+        local: true
+        download: {ollama: "qwen2.5vl:7b"}
+        size_gb: 6.0
+        vram_gb: 7
+        licence: Apache-2.0
+      - id: qwen2.5vl-3b
+        label: Qwen2.5-VL 3B
+        model: openai/qwen2.5vl:3b
+        local: true
+        download: {ollama: "qwen2.5vl:3b"}
+        size_gb: 3.2
+        vram_gb: 4
+        licence: Qwen Research (non-commercial)
+        note: Misreads more handwriting.
+
+  embedding:
+    label: Embeddings
+    help: Vectors for search. Changing it re-embeds every chunk.
+    roles: [embedding]
+    reembed: true
+    options:
+      - id: bge-m3
+        label: BGE-M3
+        model: ollama/bge-m3
+        local: true
+        download: {ollama: "bge-m3"}
+        size_gb: 1.2
+        vram_gb: 1.5
+        licence: MIT
+        note: Multilingual, 8k tokens.
+      - id: arctic-embed2
+        label: Snowflake Arctic Embed 2
+        model: ollama/snowflake-arctic-embed2
+        local: true
+        download: {ollama: "snowflake-arctic-embed2"}
+        size_gb: 1.2
+        vram_gb: 1.5
+        licence: Apache-2.0
+        note: Multilingual, 8k tokens.
+      - id: mxbai-embed-large
+        label: mxbai-embed-large
+        model: ollama/mxbai-embed-large
+        local: true
+        download: {ollama: "mxbai-embed-large"}
+        size_gb: 0.7
+        vram_gb: 1
+        licence: Apache-2.0
+        note: English only, 512 tokens (longer chunks are cut).
+
+  reranker:
+    label: Reranker
+    help: Re-orders search hits by relevance to the question.
+    roles: [reranker]
+    options:
+      - id: bge-reranker-v2-m3
+        label: BGE Reranker v2 M3
+        model: BAAI/bge-reranker-v2-m3
+        local: true
+        download: {hf: BAAI/bge-reranker-v2-m3, check: config.json}
+        size_gb: 2.3
+        vram_gb: 1.2
+        licence: Apache-2.0
+        set: {backend: cross_encoder}
+        note: Multilingual.
+      - id: bge-reranker-base
+        label: BGE Reranker base
+        model: BAAI/bge-reranker-base
+        local: true
+        download: {hf: BAAI/bge-reranker-base, check: config.json}
+        size_gb: 1.1
+        vram_gb: 0.6
+        licence: MIT
+        set: {backend: cross_encoder}
+        note: English and Chinese only.
+
+  ocr:
+    label: OCR (Tesseract languages)
+    help: Text in photos and scans. Tesseract is installed by setup; language packs are not downloaded here.
+    pipeline: ocr.languages
+    options:
+      - id: deu-eng
+        label: German + English
+        value: [deu, eng]
+        local: true
+        download: {tesseract: [deu, eng]}
+        licence: Apache-2.0
+      - id: eng
+        label: English
+        value: [eng]
+        local: true
+        download: {tesseract: [eng]}
+        licence: Apache-2.0
+      - id: deu
+        label: German
+        value: [deu]
+        local: true
+        download: {tesseract: [deu]}
+        licence: Apache-2.0
+
+  asr:
+    label: Speech recognition
+    help: Transcribes audio and video (faster-whisper). Used by the next ingest; existing transcripts are kept.
+    roles: [asr]
+    options:
+      - id: whisper-large-v3-turbo
+        label: Whisper large-v3 turbo
+        model: large-v3-turbo
+        local: true
+        download: {hf: mobiuslabsgmbh/faster-whisper-large-v3-turbo, check: model.bin}
+        size_gb: 1.6
+        vram_gb: 4
+        licence: MIT
+        set: {backend: faster_whisper}
+      - id: whisper-large-v3
+        label: Whisper large-v3
+        model: large-v3
+        local: true
+        download: {hf: Systran/faster-whisper-large-v3, check: model.bin}
+        size_gb: 3.1
+        vram_gb: 5
+        licence: MIT
+        set: {backend: faster_whisper}
+        note: Slower, slightly more accurate.
+      - id: whisper-medium
+        label: Whisper medium
+        model: medium
+        local: true
+        download: {hf: Systran/faster-whisper-medium, check: model.bin}
+        size_gb: 1.5
+        vram_gb: 3
+        licence: MIT
+        set: {backend: faster_whisper}
+      - id: whisper-small
+        label: Whisper small
+        model: small
+        local: true
+        download: {hf: Systran/faster-whisper-small, check: model.bin}
+        size_gb: 0.5
+        vram_gb: 1.5
+        licence: MIT
+        set: {backend: faster_whisper}
+        note: For CPU-only machines.
+
+  diarization:
+    label: Speaker separation
+    help: Who spoke when. pyannote models are gated on Hugging Face (token + accepted terms).
+    roles: [diarization]
+    options:
+      - id: pyannote-community-1
+        label: pyannote community-1
+        model: pyannote/speaker-diarization-community-1
+        local: true
+        download: {hf: pyannote/speaker-diarization-community-1, check: config.yaml, gated: true}
+        size_gb: 0.03
+        vram_gb: 1.5
+        licence: CC-BY-4.0
+        set: {backend: pyannote}
+      - id: pyannote-3.1
+        label: pyannote 3.1
+        model: pyannote/speaker-diarization-3.1
+        local: true
+        download: {hf: pyannote/speaker-diarization-3.1, check: config.yaml, gated: true}
+        size_gb: 0.03
+        vram_gb: 1.5
+        licence: MIT
+        set: {backend: pyannote}
+      - id: none
+        label: One speaker (no separation)
+        model: none
+        local: true
+        size_gb: 0
+        vram_gb: 0
+        licence: "-"
+        set: {backend: none}
+        note: For solo recordings or without a Hugging Face token.

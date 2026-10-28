@@ -129,6 +129,9 @@ def run_item(engine, item_id: int, gateway=None) -> None:
         opts = item.options or {}
         state = {"steps": 0, "last": 0.0}
         try:
+            if item.kind == "model":
+                _run_model_item(session, status, item_id, opts)
+                return
             files, force = files_for(session, item, cfg)
             total = len(files) * (len(STAGES) - (0 if opts.get("extract", True) else 1))
 
@@ -165,8 +168,45 @@ def run_item(engine, item_id: int, gateway=None) -> None:
             session.rollback()
             item = session.get(QueueItem, item_id)
             item.status, item.error = "failed", f"{type(e).__name__}: {e}"
-        item.finished_at = _now()
-        session.commit()
+        if item.finished_at is None:
+            item.finished_at = _now()
+            session.commit()
+
+
+def _run_model_item(session: Session, status: Session, item_id: int, opts: dict) -> None:
+    """Models tab "Use": download, write the choice, and re-embed if the embedding changed."""
+    from thesiskb.llm.catalog import apply_choice, download, load_catalog
+
+    last = [0.0]
+
+    def put(p: dict, force: bool = False) -> None:
+        if not force and time.monotonic() - last[0] < PROGRESS_EVERY:
+            return
+        last[0] = time.monotonic()
+        status.execute(update(QueueItem).where(QueueItem.id == item_id).values(progress=p))
+        status.commit()
+
+    catalog = load_catalog()
+    comp = catalog.components[opts["component"]]
+    option = comp.option(opts["option"])
+    put({"stage": "download", "file": option.label, "steps": 0, "total": 0}, force=True)
+    download(option, lambda done, total: put(
+        {"stage": "download", "file": option.label, "steps": done, "total": total}
+    ))  # fmt: skip
+    apply_choice(catalog, opts["component"], option.id)
+    report: dict[str, Any] = {"component": opts["component"], "option": option.id}
+    if comp.reembed:
+        from thesiskb.core.config import get_pipeline_config
+        from thesiskb.ingest.pipeline import reembed_all
+        from thesiskb.llm import get_gateway
+
+        def step(i: int, n: int, name: str) -> None:
+            put({"stage": "re-embed", "file": name, "steps": i, "total": n})
+
+        report["re_embedded"] = reembed_all(session, get_gateway(), get_pipeline_config(), step)
+    item = session.get(QueueItem, item_id)
+    item.report, item.status, item.finished_at = report, "done", _now()
+    session.commit()
 
 
 def work(

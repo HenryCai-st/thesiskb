@@ -259,6 +259,7 @@ def jobs(limit: int = 20, session: Session = Depends(get_session)) -> list[dict[
             "id": q.id,
             "kind": q.kind,
             "paths": q.paths,
+            "options": q.options,
             "source_id": str(q.source_id) if q.source_id else None,
             "status": q.status,
             "progress": q.progress,
@@ -270,6 +271,90 @@ def jobs(limit: int = 20, session: Session = Depends(get_session)) -> list[dict[
         }
         for q in rows
     ]
+
+
+# --- Models tab ----------------------------------------------------------------------------
+
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def keys_editable(request: Request) -> bool:
+    """API keys may only be set from this machine, on a server that listens on localhost."""
+    import os
+
+    bound = os.environ.get("TKB_BIND_HOST", "127.0.0.1")
+    return bound in LOOPBACK and bool(request.client) and request.client.host in LOOPBACK
+
+
+@app.get("/api/models", dependencies=[api])
+def models_status(request: Request) -> dict[str, Any]:
+    from thesiskb.llm.catalog import key_status, load_catalog, status
+
+    catalog = load_catalog()
+    return {
+        "components": status(catalog),
+        "keys": key_status(catalog),  # only whether each is set, never the value
+        "keys_editable": keys_editable(request),
+    }
+
+
+class UseModel(BaseModel):
+    component: str
+    option: str
+    confirm_reembed: bool = False
+
+
+@app.post("/api/models/use", dependencies=[api])
+def models_use(req: UseModel, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Queue download + switch (+ re-embedding) as one item; runs after earlier items."""
+    import os
+
+    from thesiskb.ingest.queue import enqueue
+    from thesiskb.llm.catalog import load_catalog
+
+    catalog = load_catalog()
+    comp = catalog.components.get(req.component)
+    if comp is None:
+        raise HTTPException(status_code=404, detail=f"no component '{req.component}'")
+    try:
+        option = comp.option(req.option)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"no option '{req.option}'") from e
+    if option.env_key and not os.environ.get(option.env_key):
+        raise HTTPException(status_code=400, detail=f"set {option.env_key} first")
+    if comp.reembed and not req.confirm_reembed:
+        n = session.scalar(select(func.count()).select_from(Chunk)) or 0
+        raise HTTPException(
+            status_code=409,
+            detail=f"Changing the embedding model re-embeds all {n} chunks; confirm to queue it.",
+        )
+    item = enqueue(session, "model", component=req.component, option=req.option)
+    return {"queued": item.id}
+
+
+@app.post("/api/keys", dependencies=[api])
+async def keys_set(request: Request) -> dict[str, Any]:
+    """{name, value}. Parsed by hand: a FastAPI validation error would echo the body (the key)."""
+    from thesiskb.llm.catalog import load_catalog, set_key
+
+    if not keys_editable(request):
+        raise HTTPException(
+            status_code=403,
+            detail="API keys can only be set from this computer, with the server on localhost",
+        )
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    name = body.get("name") if isinstance(body, dict) else None
+    value = body.get("value") if isinstance(body, dict) else None
+    if not isinstance(name, str) or not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="send {name, value} as JSON strings")
+    try:
+        set_key(load_catalog(), name, value)
+    except ValueError as e:  # messages name the key, never contain the value
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"name": name, "set": True}
 
 
 @app.get("/api/sources", dependencies=[api])

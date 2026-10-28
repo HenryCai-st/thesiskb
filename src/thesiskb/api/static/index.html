@@ -79,6 +79,12 @@ details.trace { margin-top: 10px; font-size: 13.5px; }
 details.trace summary { cursor: pointer; color: var(--accent); }
 details.trace h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
 details.trace .q { font: 13px var(--mono); overflow-wrap: anywhere; }
+.models h4 { margin: 16px 0 2px; font-size: 14px; }
+.models table td, .models table th { font-size: 13px; }
+.models tr.cur td { background: var(--accent-soft); }
+.keyrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+.keyrow code { min-width: 170px; }
+.keyrow input { flex: 1; min-width: 160px; font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .seg button { font: inherit; border: 0; background: var(--panel); color: var(--muted); padding: 5px 10px; cursor: pointer; }
 .seg button.on { background: var(--accent-soft); color: var(--text); }
@@ -121,6 +127,7 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
     <button data-tab="tasks">Tasks</button>
     <button data-tab="sources">Sources</button>
     <button data-tab="graph">Graph</button>
+    <button data-tab="models">Models</button>
   </nav>
   <span class="muted" id="status"></span>
 </header>
@@ -170,6 +177,14 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
       <div id="graph"></div>
       <p class="muted" id="graph-note" style="margin:6px 0 0">Pick an entity. Click a node to see its sources, an edge to see the passage it was extracted from.</p>
     </div>
+    <div class="card hidden" id="tab-models">
+      <p class="muted" style="margin-top:0">Models per component. <b>Use</b> downloads the model if needed and switches to it; downloads wait in the ingest queue and run one at a time. Changes are written to <code>config/models.yaml</code> (OCR: <code>pipeline.yaml</code>).</p>
+      <div id="model-jobs"></div>
+      <div id="models"></div>
+      <h3 style="font-size:15px;margin:18px 0 4px">API keys</h3>
+      <p class="muted" style="margin:0 0 6px">Stored in <code>.env</code> on the server; never shown again, only whether one is set.</p>
+      <div id="keys"></div>
+    </div>
   </section>
 
   <aside class="card" id="viewer">
@@ -208,10 +223,11 @@ const ts = (s) => { s = Math.floor(s); const m = Math.floor(s / 60); return `${m
 // --- tabs ---
 document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
   document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
-  ["ask", "tasks", "sources", "graph"].forEach((t) => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+  ["ask", "tasks", "sources", "graph", "models"].forEach((t) => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
   if (b.dataset.tab === "tasks") loadTasks();
   if (b.dataset.tab === "sources") loadSources();
   if (b.dataset.tab === "graph" && !$("#ent-hits").innerHTML) searchEntities();
+  if (b.dataset.tab === "models") loadModels();
 });
 
 // --- ask ---
@@ -593,7 +609,8 @@ async function loadSources() {
 let queueTimer = null, queueActive = false;
 async function loadQueue() {
   const items = await api("/api/jobs?limit=8");
-  const label = (q) => q.kind === "reingest" ? "re-ingest " + (q.paths[0] || "").split("/").pop() : "ingest " + q.paths.join(", ");
+  const label = (q) => q.kind === "reingest" ? "re-ingest " + (q.paths[0] || "").split("/").pop()
+    : q.kind === "model" ? `model: ${(q.options || {}).component} → ${(q.options || {}).option}` : "ingest " + q.paths.join(", ");
   $("#queue").innerHTML = items.length ? '<div class="muted">Ingest queue (one at a time; questions wait while it runs)</div>' + items.map((q) => {
     const p = q.progress || {};
     const pct = p.total ? Math.round(100 * p.steps / p.total) : 0;
@@ -618,6 +635,64 @@ $("#ingest-go").onclick = async () => {
   catch (e) { alert(e.message); }
   loadQueue();
 };
+
+// --- models ---
+let modelTimer = null;
+const gb = (x) => x == null ? "" : x >= 1 ? `${x} GB` : `${Math.round(x * 1000)} MB`;
+async function loadModels() {
+  const m = await api("/api/models");
+  $("#models").innerHTML = '<div class="models">' + m.components.map((c) => `<h4>${esc(c.label)}</h4>
+    <div class="muted">${esc(c.help)}</div>
+    <table><thead><tr><th>Model</th><th>Size</th><th>VRAM</th><th>Licence</th><th>Status</th><th></th></tr></thead><tbody>
+    ${c.options.map((o) => {
+      const st = !o.local ? (o.installed ? "key set" : `needs ${esc(o.env_key)}`)
+        : o.installed === true ? "installed" : o.installed === false ? (o.gated ? "not downloaded (gated)" : "not downloaded") : "unknown";
+      const act = c.current === o.id ? '<span class="tag">in use</span>'
+        : `<button class="small" data-use="${c.key}|${o.id}" data-reembed="${c.reembed ? 1 : 0}"${!o.local && !o.installed ? " disabled" : ""}>Use</button>`;
+      return `<tr class="${c.current === o.id ? "cur" : ""}"><td>${esc(o.label)}${o.local ? "" : ' <span class="tag">online</span>'}${o.note ? `<div class="muted">${esc(o.note)}</div>` : ""}</td>
+        <td>${o.local ? gb(o.size_gb) : "—"}</td><td>${o.local && o.vram_gb ? gb(o.vram_gb) : "—"}</td><td class="muted">${esc(o.licence)}</td><td class="muted">${st}</td><td>${act}</td></tr>`;
+    }).join("")}</tbody></table>`).join("") + "</div>";
+  $("#models").querySelectorAll("[data-use]").forEach((b) => b.onclick = () => useModel(b));
+  $("#keys").innerHTML = Object.entries(m.keys).map(([k, set]) => `<div class="keyrow"><code>${esc(k)}</code>
+    <span class="tag">${set ? "set" : "not set"}</span>
+    ${m.keys_editable ? `<input type="password" autocomplete="off" data-key="${esc(k)}" placeholder="paste a new key"><button class="small" data-save="${esc(k)}">Save</button>` : ""}</div>`).join("")
+    + (m.keys_editable ? "" : '<p class="muted">Keys can only be set from the computer running the server, with the server on localhost.</p>');
+  $("#keys").querySelectorAll("[data-save]").forEach((b) => b.onclick = async () => {
+    const input = $(`#keys input[data-key="${b.dataset.save}"]`);
+    if (!input.value.trim()) return;
+    try { await api("/api/keys", { method: "POST", body: JSON.stringify({ name: b.dataset.save, value: input.value }) }); }
+    catch (e) { alert(e.message); }
+    input.value = ""; loadModels();
+  });
+  loadModelJobs();
+}
+async function useModel(b) {
+  const [component, option] = b.dataset.use.split("|");
+  const send = (confirm_reembed) => api("/api/models/use", { method: "POST", body: JSON.stringify({ component, option, confirm_reembed }) });
+  try { await send(false); }
+  catch (e) {
+    const msg = (() => { try { return JSON.parse(e.message).detail; } catch (_) { return e.message; } })();
+    if (b.dataset.reembed === "1" && /re-embeds/.test(msg)) {
+      if (!confirm(msg + "\n\nSearch quality depends on it; questions wait while it runs.")) return;
+      await send(true);
+    } else { alert(msg); return; }
+  }
+  loadModelJobs();
+}
+async function loadModelJobs() {
+  const items = (await api("/api/jobs?limit=10")).filter((q) => q.kind === "model").slice(0, 4);
+  $("#model-jobs").innerHTML = items.map((q) => {
+    const p = q.progress || {}, o = q.options || {};
+    const pct = p.total ? Math.round(100 * p.steps / p.total) : null;
+    const now = q.status === "running" ? `${esc(p.stage || "starting")} ${esc(p.file || "")} ${pct != null ? pct + "%" : ""}${p.stage === "download" && p.total ? ` (${(p.steps / 1e9).toFixed(2)} / ${(p.total / 1e9).toFixed(2)} GB)` : ""}`
+      : q.status === "failed" ? esc((q.error || "").slice(0, 200)) : "";
+    return `<div class="src" style="cursor:default"><span class="tag">${esc(q.status)}</span><span><span class="name">${esc(o.component)} → ${esc(o.option)}</span> <span class="muted">${now}</span></span></div>`;
+  }).join("");
+  const active = items.some((q) => q.status === "queued" || q.status === "running");
+  clearTimeout(modelTimer);
+  if (active) modelTimer = setTimeout(loadModelJobs, 1500);
+  else if (modelTimer !== null && items.length && items[0].status !== "queued") { modelTimer = null; loadModels(); }
+}
 
 // --- entity graph ---
 let cy = null, graphSeed = null, searchTimer = null;

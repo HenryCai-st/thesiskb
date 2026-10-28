@@ -939,6 +939,8 @@ def serve(
     port: int = typer.Option(8000),
 ) -> None:
     """Start the REST API + web UI (and the OpenAI-compatible /v1 endpoint)."""
+    import os
+
     import uvicorn
 
     settings = get_settings()
@@ -946,6 +948,7 @@ def serve(
         console.print("[red]Refusing to listen on a network interface without TKB_API_TOKEN[/]")
         raise typer.Exit(code=1)
     console.print(f"ThesisKB on http://{host}:{port}  (API docs: /docs)")
+    os.environ["TKB_BIND_HOST"] = host  # the Models tab sets API keys only on localhost
     uvicorn.run("thesiskb.api.app:app", host=host, port=port, log_level="info")
 
 

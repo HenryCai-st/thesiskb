@@ -18,6 +18,9 @@ is optional.
 | "Which datasets / products appear in my sources?" | entities and relations extracted at ingestion, queried with SQL; spelling variants merged into one entity, browsable in the web UI's Graph tab |
 | anything else | hybrid search (vectors + keywords) over all sources, reranked |
 
+Models are chosen per component in the web UI's Models tab (sizes and VRAM shown before
+downloading); an online answer model (Claude) is optional.
+
 Answers only cover what you put in — they are a reading guide for your own library, not a
 source to cite in the thesis.
 

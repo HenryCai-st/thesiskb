@@ -696,6 +696,29 @@ def _short_title(src: Source) -> str:
     return f"{kind}: {title}{year}"
 
 
+def reembed_all(
+    session: Session,
+    gateway: LLMGateway,
+    cfg: PipelineConfig,
+    step: Callable[[int, int, str], None] | None = None,
+) -> int:
+    """After the embedding model changed: new vectors for every chunk, and entity names
+    re-embedded (and near-duplicates checked again) with the same model. Returns sources done."""
+    sources = session.scalars(select(Source).order_by(Source.path)).all()
+    for i, src in enumerate(sources, 1):
+        if step:
+            step(i - 1, len(sources), src.path.rsplit("/", 1)[-1])
+        _embed_source(session, src, gateway)
+        session.commit()
+    session.execute(update(Entity).values(embedding=None))
+    if cfg.entities.auto_merge:
+        resolve_entities(session, gateway, partial(save_snapshot, session, cfg, "before-merge"))
+    session.commit()
+    if step:
+        step(len(sources), len(sources), "")
+    return len(sources)
+
+
 def _embed_source(session: Session, src: Source, gateway: LLMGateway) -> None:
     chunks = session.scalars(
         select(Chunk).where(Chunk.source_id == src.id).order_by(Chunk.id)
