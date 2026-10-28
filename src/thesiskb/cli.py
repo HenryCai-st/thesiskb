@@ -967,6 +967,48 @@ def _alembic_config():
     return cfg
 
 
+entities_app = typer.Typer(help="Entities in the knowledge graph.", no_args_is_help=True)
+app.add_typer(entities_app, name="entities")
+
+
+@entities_app.command("merges")
+def entities_merges(
+    limit: int = typer.Option(100, help="Rows per table"),
+):
+    """Automatic entity merges (newest first), then near-duplicates left as suggestions."""
+    from sqlalchemy import select
+
+    from thesiskb.core.db import session_scope
+    from thesiskb.core.models import Entity, EntityMerge
+
+    with session_scope() as session:
+        for status, title in (("merged", "Automatic merges"), ("suggested", "Suggestions")):
+            rows = session.execute(
+                select(EntityMerge, Entity.name)
+                .join(Entity, Entity.id == EntityMerge.kept_id)
+                .where(EntityMerge.status == status)
+                .order_by(EntityMerge.created_at.desc(), EntityMerge.id.desc())
+                .limit(limit)
+            ).all()
+            table = Table(title=f"{title} ({len(rows)})")
+            for col in ("Kept", "Merged" if status == "merged" else "Similar to", "Why", "Sim."):
+                table.add_column(col, overflow="fold")
+            for m, kept in rows:
+                why = {
+                    "key": "same name",
+                    "variant": "spelling/plural",
+                    "shared": "similar + neighbour",
+                }
+                table.add_row(
+                    escape(kept),
+                    escape(m.other_name),
+                    why.get(m.reason, m.reason),
+                    f"{m.similarity:.3f}" if m.similarity is not None else "",
+                )
+            console.print(table)
+    console.print("[dim]A wrong merge? Report it with the two names (docs/usage.md).[/]")
+
+
 @db_app.command("upgrade")
 def db_upgrade(revision: str = "head") -> None:
     """Apply Alembic migrations."""

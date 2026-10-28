@@ -20,6 +20,36 @@ fixtures:
   voros: Voros-GenericForesightProcess.pdf      # Voros, "A generic foresight process framework" (19 p.)
   granola_csv: granola-export-test.csv           # Granola export: AI summary + transcript per meeting (ingested from M13)
 
+# Entity names (Milestone 14). same: spelling variants of one thing, which must end up as one
+# entity; different: look-alikes that must stay apart. Names taken from the extracted entities.
+entity_variants:
+  same:
+    - [Monte-Carlo sampling, Monte Carlo sampling]
+    - [Super Resolution, super-resolution]
+    - [GAN, GANs]
+    - [Generative Adversarial Networks, Generative Adversarial Network]
+    - [Variational Autoencoders, Variational Autoencoder, Variational Auto-Encoder]
+    - [DDPM, DDPMs]
+    - [Latent Diffusion Models, Latent Diffusion Model]
+    - [Markov chains, Markov chain]
+    - [normalizing flows, Normalizing Flow]
+    - [diffusion models, diffusion model]
+    - [large language models, Large Language Model]
+    - [Bachelor Project, Bachelor Projekt]
+    - [Lebensmittelvergiftung, Lebensmittel Vergiftung]
+    - [Foresight process, foresight processes]
+  different:
+    - [Possible futures, Probable futures]
+    - [Plausible futures, Probable futures]
+    - [preferable future, probable future]
+    - [marginal likelihood, marginal probability]
+    - ["Song et al. [287]", "Song et al. [282]"]
+    - [Wang et al. (2022), Wang et al. (2024)]
+    - [Jetson Nano, Jetson Nano Super]
+    - [SPEAKER_04, SPEAKER_00]
+    - [text-to-image diffusion model, text-to-video diffusion models]
+    - [robots on wheels, robots on legs]
+
 questions:
   # --- Literature (Q1 type) ---
   - id: lit-01

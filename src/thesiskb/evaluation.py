@@ -143,6 +143,7 @@ def run_eval(
 
     summary = summarize(results)
     summary |= task_metrics(session, fixtures, questions, by_name)
+    summary |= entity_metrics(session, gold_path)
     session.add(
         EvalRun(
             git_sha=_git_sha(),
@@ -226,6 +227,29 @@ def task_metrics(session: Session, fixtures, questions, by_name) -> dict[str, An
         "task_recall": round(found / total, 3) if total else None,
         "tasks_missed": missed,
         "tasks_without_evidence": bad,
+    }
+
+
+def entity_metrics(session: Session, gold_path: Path) -> dict[str, Any]:
+    """Known spelling variants (entity_variants.same) that are still separate entities, and
+    known different things (entity_variants.different) that were merged. Names not in the KB
+    are ignored."""
+    from thesiskb.ingest.entities import EntityIndex, entity_key
+
+    gold = yaml.safe_load(gold_path.read_text(encoding="utf-8")).get("entity_variants") or {}
+    if not gold:
+        return {}
+    by_key = EntityIndex(session).by_key
+
+    def ids(names: list[str]) -> list:
+        return [by_key[k].id for k in map(entity_key, names) if k in by_key]
+
+    dupes = [g for g in gold.get("same", []) if len(set(ids(g))) > 1]
+    wrong = [p for p in gold.get("different", []) if len(ids(p)) == 2 and len(set(ids(p))) == 1]
+    return {
+        "entity_variant_groups": sum(len(ids(g)) > 1 for g in gold.get("same", [])),
+        "entity_duplicates": [" / ".join(g) for g in dupes],
+        "entity_wrong_merges": [" / ".join(p) for p in wrong],
     }
 
 

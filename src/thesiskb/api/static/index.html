@@ -28,7 +28,7 @@ nav button { background: none; border: 0; padding: 6px 10px; font: inherit; colo
 nav button.on { color: var(--text); background: var(--accent-soft); }
 main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr); gap: 16px;
   padding: 16px 20px; max-width: 1500px; margin: 0 auto; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px; } }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
 .hidden { display: none !important; }
 textarea { width: 100%; min-height: 64px; resize: vertical; font: inherit; color: var(--text);
@@ -79,6 +79,11 @@ details.trace { margin-top: 10px; font-size: 13.5px; }
 details.trace summary { cursor: pointer; color: var(--accent); }
 details.trace h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
 details.trace .q { font: 13px var(--mono); overflow-wrap: anywhere; }
+#graph { height: 62vh; overflow: hidden; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.chip { font-size: 13px; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--text); cursor: pointer; }
+.chip.on { background: var(--accent-soft); border-color: var(--accent); }
+.fact { font-size: 13.5px; padding: 6px 8px; border-radius: 6px; background: var(--accent-soft); margin: 6px 0; }
 details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left: 14px; overflow-wrap: anywhere; }
 </style>
 </head>
@@ -89,6 +94,7 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
     <button data-tab="ask" class="on">Ask</button>
     <button data-tab="tasks">Tasks</button>
     <button data-tab="sources">Sources</button>
+    <button data-tab="graph">Graph</button>
   </nav>
   <span class="muted" id="status"></span>
 </header>
@@ -124,6 +130,15 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
       <table><thead><tr><th>File</th><th>Type</th><th>Chunks</th><th>Stages</th><th></th></tr></thead>
         <tbody id="sources"></tbody></table>
     </div>
+    <div class="card hidden" id="tab-graph">
+      <div class="row" style="margin-top:0">
+        <input id="ent-q" placeholder="Search an entity… e.g. diffusion model" autocomplete="off" style="flex:1;min-width:180px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text)">
+        <select id="hops" title="Neighbourhood size"><option value="1">1 hop</option><option value="2">2 hops</option></select>
+      </div>
+      <div id="ent-hits" class="row"></div>
+      <div id="graph"></div>
+      <p class="muted" id="graph-note" style="margin:6px 0 0">Pick an entity. Click a node to see its sources, an edge to see the passage it was extracted from.</p>
+    </div>
   </section>
 
   <aside class="card" id="viewer">
@@ -131,6 +146,7 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
   </aside>
 </main>
 
+<script src="/static/vendor/cytoscape-3.34.2.min.js"></script>
 <script>
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -161,9 +177,10 @@ const ts = (s) => { s = Math.floor(s); const m = Math.floor(s / 60); return `${m
 // --- tabs ---
 document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
   document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
-  ["ask", "tasks", "sources"].forEach((t) => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+  ["ask", "tasks", "sources", "graph"].forEach((t) => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
   if (b.dataset.tab === "tasks") loadTasks();
   if (b.dataset.tab === "sources") loadSources();
+  if (b.dataset.tab === "graph" && !$("#ent-hits").innerHTML) searchEntities();
 });
 
 // --- ask ---
@@ -379,6 +396,74 @@ $("#ingest-go").onclick = async () => {
   catch (e) { alert(e.message); }
   loadQueue();
 };
+
+// --- entity graph ---
+let cy = null, graphSeed = null, searchTimer = null;
+async function searchEntities() {
+  const q = $("#ent-q").value.trim();
+  const rows = await api(`/api/entities?limit=12&q=${encodeURIComponent(q)}`);
+  $("#ent-hits").innerHTML = rows.map((e) =>
+    `<button class="chip${e.id === graphSeed ? " on" : ""}" data-ent="${e.id}" title="${esc(e.name)} — ${esc(e.type)}, ${e.mentions} mention${e.mentions === 1 ? "" : "s"}">${esc(e.name)} <span class="muted">${e.mentions}</span></button>`).join("")
+    || '<span class="muted">No entity matches.</span>';
+  $("#ent-hits").querySelectorAll("[data-ent]").forEach((b) => b.onclick = () => showGraph(b.dataset.ent));
+}
+$("#ent-q").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchEntities, 250); });
+$("#hops").onchange = () => graphSeed && showGraph(graphSeed);
+
+async function showGraph(id) {
+  graphSeed = id;
+  $("#ent-hits").querySelectorAll("[data-ent]").forEach((b) => b.classList.toggle("on", b.dataset.ent === id));
+  const g = await api(`/api/entities/${id}/graph?hops=${$("#hops").value}`);
+  const v = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (cy) cy.destroy();
+  cy = cytoscape({
+    container: $("#graph"),
+    elements: [
+      ...g.nodes.map((n) => ({ data: { ...n, label: n.name } })),
+      ...g.edges.map((e) => ({ data: e })),
+    ],
+    style: [
+      { selector: "node", style: { "background-color": v("--accent"), label: "data(label)", color: v("--text"),
+        "font-size": 11, "text-valign": "bottom", "text-margin-y": 3, "text-wrap": "ellipsis", "text-max-width": 140,
+        width: (n) => 14 + 5 * Math.sqrt(n.data("mentions")), height: (n) => 14 + 5 * Math.sqrt(n.data("mentions")) } },
+      { selector: "node[?seed]", style: { "background-color": v("--warn"), "font-weight": 600 } },
+      { selector: "edge", style: { width: 1.5, "line-color": v("--line"), "target-arrow-color": v("--line"),
+        "target-arrow-shape": "triangle", "curve-style": "bezier", label: "data(label)", "font-size": 9,
+        color: v("--muted"), "text-rotation": "autorotate", "text-background-color": v("--bg"), "text-background-opacity": 1 } },
+      { selector: ":selected", style: { "border-width": 3, "border-color": v("--text"), "line-color": v("--accent"), "target-arrow-color": v("--accent") } },
+    ],
+    layout: { name: g.nodes.length > 1 ? "cose" : "grid", animate: false, nodeDimensionsIncludeLabels: true },
+    wheelSensitivity: 0.3,
+  });
+  cy.on("tap", "node", (e) => showEntity(e.target.id()));
+  cy.on("tap", "edge", (e) => showEdge(e.target.data()));
+  $("#graph-note").textContent = `${g.nodes.length} entities, ${g.edges.length} relations` +
+    (g.truncated ? " (only the most-mentioned are shown)" : "") + ". Click a node for its sources, an edge for its evidence.";
+  showEntity(id);
+}
+
+async function showEntity(id) {
+  const e = await api(`/api/entities/${id}`);
+  $("#viewer").innerHTML = `<h3>${esc(e.name)}</h3>
+    <div class="muted">${esc(e.type)}${e.aliases.length ? " · also: " + esc(e.aliases.join(", ")) : ""}</div>
+    ${id !== graphSeed ? `<p><button class="small" id="recentre">show its neighbourhood</button></p>` : ""}
+    <div class="sources">${e.sources.map((s) => `<div style="padding:4px 0"><span class="name">${esc(s.title || s.filename)}</span>
+      <div class="muted">${s.chunks.map((c) => `<a href="#" data-chunk="${c.id}">${esc(where(c.locator || {}) || "passage")}</a>`).join(" · ")}</div></div>`).join("")
+      || '<p class="muted">No passage found.</p>'}</div>`;
+  const rc = $("#recentre");
+  if (rc) rc.onclick = () => showGraph(id);
+  $("#viewer").querySelectorAll("[data-chunk]").forEach((a) => a.onclick = async (ev) => {
+    ev.preventDefault(); const ch = await api(`/api/chunks/${a.dataset.chunk}`); showChunk(ch, ch.locator.t_start); });
+}
+
+async function showEdge(d) {
+  const name = (id) => cy.getElementById(id).data("name");
+  const fact = `${esc(name(d.source))} <b>${esc(d.label)}</b> ${esc(name(d.target))}`;
+  if (!d.chunk_id) { $("#viewer").innerHTML = `<div class="fact">${fact}</div><p class="muted">No evidence passage stored.</p>`; return; }
+  const ch = await api(`/api/chunks/${d.chunk_id}`);
+  showChunk(ch, ch.locator.t_start);
+  $("#viewer").insertAdjacentHTML("afterbegin", `<div class="fact">${fact}</div>`);
+}
 
 api("/api/health").then((h) => $("#status").textContent = "v" + h.version).catch(() => {});
 // "How this answer was found" links from chat clients: /?trace=<id>

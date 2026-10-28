@@ -169,6 +169,12 @@ Acceptance (A): a saved URL ingests and its citation opens the snapshot at the r
 4. **Planning (M15).** Should plans respect user availability (holidays, hours per week)? Default: no.
 5. **Test data (M11, M17).** The user provides real EPUB and HTML/URL samples when M11 starts.
 
+### Ideas found during milestones (not scheduled)
+
+- **M14:** a trailing acronym keeps variants apart ("variational autoencoders (VAEs)" vs
+  "Variational Autoencoders", "Variational lower bound (VLB)" vs "variational lower bound").
+  Dropping a parenthesised acronym in the variant check would merge them; not in M14's task list.
+
 ## 5. Research notes
 
 - Open WebUI pipes and reserved arguments: <https://docs.openwebui.com/features/extensibility/plugin/development/reserved-args>

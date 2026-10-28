@@ -8,6 +8,7 @@ Stages, run as batches so only one heavy GPU model is loaded at a time:
   chunk  stage output → segments + chunks rows                     (CPU)
   embed  bge-m3 embeddings + tsvector for chunks                   (Ollama embedding model)
   extract tasks / statements / entities per chunk → extract.json   (answer-size LLM)
+  then    new entity names embedded, near-duplicates merged          (Ollama embedding model)
 
 A parse output already on disk counts as done, so re-ingesting after a DB reset needs no GPU.
 """
@@ -25,10 +26,11 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.orm import Session
 
 from thesiskb.core.config import PipelineConfig, get_models_config, get_settings
-from thesiskb.core.models import Chunk, Job, Person, Segment, Source, Speaker, Task
+from thesiskb.core.models import Chunk, Entity, Job, Person, Segment, Source, Speaker, Task
 from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
 from thesiskb.ingest.documents import FTS_CONFIG, detect_language, document_meta, extract_blocks
+from thesiskb.ingest.entities import resolve_entities
 from thesiskb.ingest.metadata import arxiv_id_from_name, lookup_arxiv
 from thesiskb.ingest.parsers import (
     ParseContext,
@@ -198,6 +200,16 @@ def ingest(
     for src, _f in sources:
         if src.replaces and job_done(session, src, "extract" if extract else "embed"):
             retire_replaced(session, src, cfg)
+
+    # --- entities: embed new names, merge near-duplicates (ADR 0014) ---
+    if extract and session.scalar(select(Entity.id).where(Entity.embedding.is_(None)).limit(1)):
+        try:
+            report["entities_merged"] = resolve_entities(session, gateway).merged
+            session.commit()
+        except Exception as e:  # noqa: BLE001 — retried after the next ingest
+            session.rollback()
+            log.warning("entity merging failed: %s", e)
+            report["failed"].append(("entities", str(e)))
     return report
 
 

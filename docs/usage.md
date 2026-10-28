@@ -134,6 +134,25 @@ uv run tkb ask "..." --verified-only                 # answer only from verified
 The status is shown next to every citation. For the thesis itself, cite the original papers —
 use ThesisKB answers as a reading guide, never as a source (BUILD_GUIDE §8).
 
+### Looking at the graph
+
+The web UI's **Graph** tab shows the entities extracted from your sources (methods, models,
+concepts, people, …) and the relations between them. Search a name, pick it, and choose 1 or 2
+hops. Click a node to list the sources and passages that mention it; click an edge ("DDIM —
+improves — sampling speed") to open the passage the relation was read from.
+
+Spelling variants are merged into one entity automatically: "Monte-Carlo sampling" and "Monte
+Carlo sampling", "GAN" and "GANs", "Bachelor Project" and "Bachelor Projekt". Names with
+different numbers ("Figure 2" / "Figure 4") are never merged; look-alikes that may be different
+things ("possible" / "probable futures") are only listed as suggestions. To see what was merged:
+
+```bash
+uv run tkb entities merges      # automatic merges (newest first), then suggestions
+```
+
+A wrong merge cannot be undone from the UI; report it with the two names (`tkb report`). The
+variants checked by `tkb eval` are in `eval/questions.yaml` under `entity_variants`; add yours.
+
 ## 5. Using it from Claude (or another agent)
 
 ```bash

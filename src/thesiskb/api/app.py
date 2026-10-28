@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -28,7 +29,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from thesiskb import __version__
 from thesiskb.core.config import get_pipeline_config, get_settings
 from thesiskb.core.db import get_engine
-from thesiskb.core.models import Chunk, Job, Person, Source, Speaker, Statement, Task
+from thesiskb.core.models import (
+    Chunk,
+    Entity,
+    EntityMention,
+    Job,
+    Person,
+    Relation,
+    Source,
+    Speaker,
+    Statement,
+    Task,
+)
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -382,6 +394,122 @@ def person(name: str, session: Session = Depends(get_session)) -> dict[str, Any]
     }
 
 
+# --- entity graph (Graph tab) ---------------------------------------------------------------
+
+GRAPH_MAX_NODES = 150
+
+
+def _mentions(session: Session, ids) -> dict[uuid.UUID, int]:
+    return dict(
+        session.execute(
+            select(EntityMention.entity_id, func.count())
+            .where(EntityMention.entity_id.in_(ids))
+            .group_by(EntityMention.entity_id)
+        ).all()
+    )
+
+
+@app.get("/api/entities", dependencies=[api])
+def entities(
+    q: str = "", limit: int = 20, session: Session = Depends(get_session)
+) -> list[dict[str, Any]]:
+    """Entities whose name or alias contains `q`, most-mentioned first."""
+    n = func.count(EntityMention.chunk_id)
+    query = (
+        select(Entity, n)
+        .outerjoin(EntityMention, EntityMention.entity_id == Entity.id)
+        .group_by(Entity.id)
+        .order_by(n.desc(), Entity.name)
+        .limit(limit)
+    )
+    if q.strip():
+        pattern = f"%{q.strip()}%"
+        query = query.where(
+            or_(
+                Entity.name.ilike(pattern), func.array_to_string(Entity.aliases, "|").ilike(pattern)
+            )
+        )
+    return [
+        {"id": str(e.id), "name": e.name, "type": e.type, "mentions": m}
+        for e, m in session.execute(query)
+    ]
+
+
+@app.get("/api/entities/{entity_id}", dependencies=[api])
+def entity(entity_id: uuid.UUID, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """An entity with the sources (and chunks) that mention it or state one of its relations."""
+    e = session.get(Entity, entity_id)
+    if e is None:
+        raise HTTPException(status_code=404)
+    mentioned = select(EntityMention.chunk_id).where(EntityMention.entity_id == e.id)
+    related = select(Relation.chunk_id).where(or_(Relation.subj == e.id, Relation.obj == e.id))
+    rows = session.execute(
+        select(Chunk.id, Chunk.locator, Source)
+        .join(Source, Source.id == Chunk.source_id)
+        .where(or_(Chunk.id.in_(mentioned), Chunk.id.in_(related)))
+        .order_by(Source.path, Chunk.id)
+        .limit(200)
+    ).all()
+    by_source: dict[uuid.UUID, dict[str, Any]] = {}
+    for chunk_id, locator, src in rows:
+        out = by_source.setdefault(src.id, source_out(src) | {"chunks": []})
+        out["chunks"].append({"id": str(chunk_id), "locator": locator})
+    return {
+        "id": str(e.id),
+        "name": e.name,
+        "type": e.type,
+        "aliases": e.aliases,
+        "sources": list(by_source.values()),
+    }
+
+
+@app.get("/api/entities/{entity_id}/graph", dependencies=[api])
+def entity_graph(
+    entity_id: uuid.UUID,
+    hops: int = Query(1, ge=1, le=2),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """The entity's neighbourhood: nodes within `hops` relations and the relations among them."""
+    from thesiskb.retrieval.graph import neighbours
+
+    if session.get(Entity, entity_id) is None:
+        raise HTTPException(status_code=404)
+    ids = neighbours(session, [entity_id], hops) | {entity_id}
+    counts = _mentions(session, ids)
+    truncated = len(ids) > GRAPH_MAX_NODES
+    if truncated:  # keep the most-mentioned neighbours
+        ids = {entity_id} | set(
+            sorted(ids - {entity_id}, key=lambda i: -counts.get(i, 0))[: GRAPH_MAX_NODES - 1]
+        )
+    ents = session.scalars(select(Entity).where(Entity.id.in_(ids))).all()
+    rels = session.scalars(
+        select(Relation).where(Relation.subj.in_(ids), Relation.obj.in_(ids))
+    ).all()
+    return {
+        "nodes": [
+            {
+                "id": str(e.id),
+                "name": e.name,
+                "type": e.type,
+                "mentions": counts.get(e.id, 0),
+                "seed": e.id == entity_id,
+            }
+            for e in ents
+        ],
+        "edges": [
+            {
+                "id": str(r.id),
+                "source": str(r.subj),
+                "target": str(r.obj),
+                "label": r.pred,
+                "chunk_id": str(r.chunk_id) if r.chunk_id else None,
+            }
+            for r in rels
+        ],
+        "truncated": truncated,
+    }
+
+
 # --- files ---------------------------------------------------------------------------------
 
 
@@ -605,6 +733,9 @@ def chat_completions(
 
 
 # --- UI ------------------------------------------------------------------------------------
+
+
+app.mount("/static", StaticFiles(directory=STATIC), name="static")  # vendored Cytoscape.js
 
 
 @app.get("/", response_class=HTMLResponse)

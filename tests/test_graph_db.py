@@ -62,9 +62,11 @@ def kb(db_url):
         )
         cp = Chunk(source_id=paper.id, text="A paper", locator={"page": 1})
         s.add_all([cv, ca, ca2, cp])
-        jetson = Entity(name="Jetson Orin Nano Super", type="product", aliases=[])
-        spark = Entity(name="DGX Spark", type="product", aliases=[])
-        llms = Entity(name="LLMs", type="concept", aliases=[])
+        jetson = Entity(
+            name="Jetson Orin Nano Super", type="product", aliases=[], key="jetson orin nano super"
+        )
+        spark = Entity(name="DGX Spark", type="product", aliases=[], key="dgx spark")
+        llms = Entity(name="LLMs", type="concept", aliases=[], key="llms")
         s.add_all([jetson, spark, llms])
         s.flush()
         s.add_all(

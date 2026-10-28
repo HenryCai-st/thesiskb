@@ -15,7 +15,7 @@ is optional.
 | "What is the state of the art for designing diffusion models?" | literature path: several searches over your papers, per-passage evidence summaries, synthesis with page citations |
 | "What does Prof. X prefer for the evaluation?" | person path: only what that person said (speaker-labelled transcripts) or wrote |
 | "Who does what until when?" / "When is my mid-term?" | tasks extracted from notes and meetings into a table, answered by SQL, sorted by date |
-| "Which datasets / products appear in my sources?" | entities and relations extracted at ingestion, queried with SQL |
+| "Which datasets / products appear in my sources?" | entities and relations extracted at ingestion, queried with SQL; spelling variants merged into one entity, browsable in the web UI's Graph tab |
 | anything else | hybrid search (vectors + keywords) over all sources, reranked |
 
 Answers only cover what you put in — they are a reading guide for your own library, not a

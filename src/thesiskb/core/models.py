@@ -145,8 +145,33 @@ class Entity(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     aliases: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    key: Mapped[str] = mapped_column(Text, nullable=False)  # entity_key(name); unique
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))  # of the name
 
-    __table_args__ = (Index("ix_entities_lower_name", func.lower(name)),)
+    __table_args__ = (
+        Index("ix_entities_lower_name", func.lower(name)),
+        Index("ux_entities_key", "key", unique=True),
+    )
+
+
+class EntityMerge(Base):
+    """Log of automatic entity merges and of near-duplicates left as suggestions."""
+
+    __tablename__ = "entity_merges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kept_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
+    )
+    other_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("entities.id", ondelete="CASCADE")
+    )
+    other_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # merged | suggested
+    reason: Mapped[str] = mapped_column(String(16), nullable=False)  # key|variant|similar|shared
+    similarity: Mapped[float | None] = mapped_column(Float)
+    shared_neighbours: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Relation(Base):

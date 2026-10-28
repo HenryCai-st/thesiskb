@@ -25,12 +25,11 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, create_model
-from sqlalchemy import any_, delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from thesiskb.core.models import (
     Chunk,
-    Entity,
     EntityMention,
     Person,
     Relation,
@@ -39,6 +38,7 @@ from thesiskb.core.models import (
     Task,
 )
 from thesiskb.ingest.dates import anchor_for, resolve_due
+from thesiskb.ingest.entities import EntityIndex
 from thesiskb.llm.gateway import LLMGateway
 
 log = logging.getLogger(__name__)
@@ -268,23 +268,6 @@ def resolve_person(session: Session, name: str | None) -> Person | None:
     return None
 
 
-def _entity(session: Session, cache: dict[str, Entity], name: str, etype: str) -> Entity:
-    key = name.strip().lower()
-    if key in cache:
-        return cache[key]
-    ent = session.scalar(
-        select(Entity).where(
-            (func.lower(Entity.name) == key) | (name.strip() == any_(Entity.aliases))
-        )
-    )
-    if ent is None:
-        ent = Entity(name=name.strip(), type=etype, aliases=[])
-        session.add(ent)
-        session.flush()
-    cache[key] = ent
-    return ent
-
-
 class ExtractReport(BaseModel):
     chunks: int = 0
     llm_calls: int = 0
@@ -373,7 +356,7 @@ def _write(session, src: Source, results, ref: date, rep: ExtractReport) -> None
     have = {_norm(t.description) for t in confirmed}
 
     anchor = anchor_for([t.due for _, x in results for t in x.tasks], ref)
-    ent_cache: dict[str, Entity] = {}
+    index = EntityIndex(session)
     for c, x in results:
         for t in x.tasks:
             if _norm(t.description) in have:
@@ -413,14 +396,14 @@ def _write(session, src: Source, results, ref: date, rep: ExtractReport) -> None
         for e in x.entities:
             if not e.name.strip():
                 continue
-            ent = _entity(session, ent_cache, e.name, e.type)
+            ent = index.get(e.name, e.type)
             if ent.id not in mentioned:
                 session.add(EntityMention(entity_id=ent.id, chunk_id=c.id))
                 mentioned.add(ent.id)
                 rep.entities += 1
         for r in x.relations:
-            subj = _entity(session, ent_cache, r.subject, "other")
-            obj = _entity(session, ent_cache, r.object, "other")
+            subj = index.get(r.subject, "other")
+            obj = index.get(r.object, "other")
             session.add(
                 Relation(
                     subj=subj.id,
