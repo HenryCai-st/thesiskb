@@ -150,8 +150,23 @@ things ("possible" / "probable futures") are only listed as suggestions. To see 
 uv run tkb entities merges      # automatic merges (newest first), then suggestions
 ```
 
-A wrong merge cannot be undone from the UI; report it with the two names (`tkb report`). The
-variants checked by `tkb eval` are in `eval/questions.yaml` under `entity_variants`; add yours.
+The variants checked by `tkb eval` are in `eval/questions.yaml` under `entity_variants`; add
+yours.
+
+**Going back.** Before the first automatic merge of an ingest, the whole entity graph is saved to
+`data/backups/entities/` (the last 10 automatic snapshots are kept; files you save yourself are
+never deleted). If merging makes things worse, switch back:
+
+```bash
+uv run tkb entities snapshots             # list, newest first
+uv run tkb entities restore 2             # replace the graph with snapshot #2
+uv run tkb entities snapshot --label mine # save the current graph yourself
+```
+
+A restore first saves the current graph, so it can be undone the same way. To keep a restored,
+unmerged graph, set `entities: auto_merge: false` in `config/pipeline.yaml`; otherwise the next
+ingest merges near-duplicates again. Snapshots stay in `data/` and are never committed (they hold
+names from your sources). To report a wrong merge, send the two names (`tkb report`).
 
 ## 5. Using it from Claude (or another agent)
 

@@ -100,6 +100,8 @@ Goal: one node per real-world thing, and a way to look at the graph.
 
 Acceptance: no duplicate pairs among the test set's known variants; the graph tab shows an entity's neighbourhood and every edge opens its evidence; `tkb eval` rel-01/rel-02 do not regress.
 
+Added after M14 (user request): **graph snapshots.** Save the entity graph to `data/backups/entities/` before automatic merging, `tkb entities snapshots` / `restore` / `snapshot` to switch back and forth, and `entities.auto_merge` to turn merging off (ADR 0015).
+
 ### Milestone 15 — Task editing, planning, week and calendar views (point 8)
 Goal: plan thesis work by week, with the user in control.
 

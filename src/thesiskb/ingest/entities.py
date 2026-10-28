@@ -23,6 +23,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections.abc import Callable
 
 from pydantic import BaseModel
 from sqlalchemy import delete, func, or_, select, text, update
@@ -175,8 +176,11 @@ class ResolveReport(BaseModel):
     suggested: int = 0
 
 
-def resolve_entities(session: Session, gateway: LLMGateway) -> ResolveReport:
-    """Embed names that have no vector yet and merge or suggest their near-duplicates."""
+def resolve_entities(
+    session: Session, gateway: LLMGateway, before_merge: Callable[[], object] | None = None
+) -> ResolveReport:
+    """Embed names that have no vector yet and merge or suggest their near-duplicates.
+    `before_merge` runs once, before the first merge (the pipeline saves a graph snapshot)."""
     rep = ResolveReport()
     new = session.scalars(select(Entity).where(Entity.embedding.is_(None))).all()
     role = gateway.role_for("embedding", True)  # entity names may come from local-only sources
@@ -213,6 +217,8 @@ def resolve_entities(session: Session, gateway: LLMGateway) -> ResolveReport:
             (a, b), key=lambda x: (-mention_count(session, x.id), len(x.name), x.name)
         )
         if status == "merged":
+            if before_merge and not rep.merged:
+                before_merge()
             merge_entities(session, keep, drop, reason, sim, shared)
             gone.add(drop.id)
             rep.merged += 1

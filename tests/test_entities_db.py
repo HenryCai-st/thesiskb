@@ -211,3 +211,86 @@ def test_entity_metrics_counts_duplicates_and_wrong_merges(engine, tmp_path):
     assert m["entity_variant_groups"] == 2  # A / a- (one key) and B / Bs; "gone" not in the KB
     assert m["entity_duplicates"] == [f"{TAG} B / {TAG} Bs"]
     assert m["entity_wrong_merges"] == []
+
+
+def _graph(s: Session) -> dict:
+    ents = s.scalars(select(Entity).where(Entity.key.like(f"{TAG}%"))).all()
+    ids = [e.id for e in ents]
+    return {
+        "entities": sorted((e.name, tuple(e.aliases)) for e in ents),
+        "mentions": s.query(EntityMention).filter(EntityMention.entity_id.in_(ids)).count(),
+        "relations": sorted(
+            r.pred for r in s.scalars(select(Relation).where(Relation.subj.in_(ids)))
+        ),
+    }
+
+
+def test_snapshot_then_restore_switches_back_to_the_unmerged_graph(engine, tmp_path):
+    from thesiskb.core.config import EntitiesConfig, PipelineConfig
+    from thesiskb.ingest.entities import merge_entities
+    from thesiskb.ingest.entity_snapshots import list_snapshots, restore_snapshot, save_snapshot
+
+    cfg = PipelineConfig(data_dir=tmp_path, entities=EntitiesConfig(keep_snapshots=2))
+    with Session(engine) as s:
+        src, (c1, c2) = _kb(s)
+        idx = EntityIndex(s)
+        gan, gans, x = (idx.get(f"{TAG} {n}", "model") for n in ("GAN", "GANs", "X"))
+        s.add_all(
+            [
+                EntityMention(entity_id=gan.id, chunk_id=c1.id),
+                EntityMention(entity_id=gans.id, chunk_id=c2.id),
+                Relation(subj=gans.id, pred="beats", obj=x.id, chunk_id=c2.id),
+            ]
+        )
+        s.commit()
+        before = _graph(s)
+        snap = save_snapshot(s, cfg, "pre-test")
+        merge_entities(s, gan, gans, "variant", 0.92)
+        s.commit()
+        assert _graph(s) != before
+
+        rep = restore_snapshot(s, cfg, snap)
+        s.commit()
+        assert _graph(s) == before
+        assert rep.restored["entities"] >= 3 and rep.skipped_missing_chunk == 0
+        assert rep.saved_current.name.endswith("-before-restore.json.gz")
+        # the merged graph was saved first: restoring it switches forward again
+        restore_snapshot(s, cfg, rep.saved_current)
+        s.commit()
+        assert [n for n, _ in _graph(s)["entities"]] == [f"{TAG} GAN", f"{TAG} X"]
+
+        # rows of a source deleted since the snapshot are skipped, not restored dangling
+        s.execute(delete(Chunk).where(Chunk.id == c2.id))
+        s.commit()
+        rep = restore_snapshot(s, cfg, snap)
+        s.commit()
+        assert rep.skipped_missing_chunk == 2  # GANs' mention and the relation
+        assert _graph(s)["relations"] == []
+
+    kinds = [i.label for i in list_snapshots(cfg)]
+    assert kinds.count("before-restore") == 2  # keep_snapshots=2: the oldest was pruned
+    assert "pre-test" in kinds  # snapshots with other labels are never pruned
+
+
+def test_pipeline_snapshots_before_merging_and_respects_auto_merge(engine, tmp_path, monkeypatch):
+    from thesiskb.core.config import EntitiesConfig, PipelineConfig
+    from thesiskb.ingest import pipeline
+    from thesiskb.ingest.entity_snapshots import list_snapshots
+
+    names = {f"{TAG} GAN": 0.0, f"{TAG} GANs": 0.40}
+    with Session(engine) as s:
+        idx = EntityIndex(s)
+        for n in names:
+            idx.get(n, "model")
+        s.commit()
+        off = PipelineConfig(data_dir=tmp_path, entities=EntitiesConfig(auto_merge=False))
+        gw = FakeGateway(names)
+        pipeline.ingest(s, [], off, gw)
+        assert gw.calls == [] and list_snapshots(off) == []  # switched off: nothing happens
+
+        on = PipelineConfig(data_dir=tmp_path)
+        report = pipeline.ingest(s, [], on, FakeGateway(names))
+        assert report["entities_merged"] >= 1
+        (snap,) = list_snapshots(on)
+        assert snap.label == "before-merge"
+        assert s.scalar(select(Entity).where(Entity.key == f"{TAG} gans")) is None

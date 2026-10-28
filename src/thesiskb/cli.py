@@ -1009,6 +1009,85 @@ def entities_merges(
     console.print("[dim]A wrong merge? Report it with the two names (docs/usage.md).[/]")
 
 
+@entities_app.command("snapshot")
+def entities_snapshot(label: str = typer.Option("manual", help="Word in the file name")):
+    """Save the entity graph to data/backups/entities/ (kept until you delete it)."""
+    from thesiskb.core.db import session_scope
+    from thesiskb.ingest.entity_snapshots import save_snapshot
+
+    with session_scope() as session:
+        path = save_snapshot(session, get_pipeline_config(), label)
+    console.print(f"Saved {escape(str(path))}")
+
+
+@entities_app.command("snapshots")
+def entities_snapshots():
+    """List saved entity graph snapshots, newest first."""
+    from thesiskb.ingest.entity_snapshots import list_snapshots
+
+    rows = list_snapshots(get_pipeline_config())
+    table = Table(title=f"Entity graph snapshots ({len(rows)})")
+    for col in ("#", "File", "Kind", "Entities", "Relations", "Merge log"):
+        table.add_column(col, overflow="fold")
+    for i, s in enumerate(rows, 1):
+        merged = s.counts.get("entity_merges", 0)
+        table.add_row(
+            str(i),
+            s.path.name,
+            s.label,
+            str(s.counts.get("entities", 0)),
+            str(s.counts.get("relations", 0)),
+            str(merged),
+        )
+    console.print(table)
+    console.print("[dim]Switch back: tkb entities restore <# or file>[/]")
+
+
+@entities_app.command("restore")
+def entities_restore(
+    snapshot: str = typer.Argument(..., help="Number from `tkb entities snapshots`, or a file"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation"),
+):
+    """Replace the entity graph with a snapshot (the current graph is saved first)."""
+    from thesiskb.core.db import get_engine, session_scope
+    from thesiskb.ingest.entity_snapshots import list_snapshots, restore_snapshot
+    from thesiskb.ingest.queue import gpu_lock
+
+    cfg = get_pipeline_config()
+    rows = list_snapshots(cfg)
+    path = (
+        rows[int(snapshot) - 1].path
+        if snapshot.isdigit() and int(snapshot) <= len(rows)
+        else Path(snapshot)
+    )
+    if not path.exists():
+        console.print(f"[red]No snapshot '{escape(snapshot)}' (see tkb entities snapshots)[/]")
+        raise typer.Exit(code=1)
+    if not yes and not typer.confirm(f"Replace the entity graph with {path.name}?"):
+        raise typer.Exit(code=1)
+    with gpu_lock(get_engine(), wait=False) as free:
+        if not free:
+            console.print("[red]An ingest is running; restore after it finishes.[/]")
+            raise typer.Exit(code=1)
+        with session_scope() as session:
+            rep = restore_snapshot(session, cfg, path)
+    console.print(
+        "Restored "
+        + ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in rep.restored.items())
+        + (
+            f"; skipped {rep.skipped_missing_chunk} rows of deleted sources"
+            if rep.skipped_missing_chunk
+            else ""
+        )
+    )
+    console.print(f"[dim]Previous graph saved as {escape(rep.saved_current.name)}.[/]")
+    if cfg.entities.auto_merge:
+        console.print(
+            "[yellow]entities.auto_merge is on: the next ingest merges near-duplicates again. "
+            "Set it to false in config/pipeline.yaml to keep this graph.[/]"
+        )
+
+
 @db_app.command("upgrade")
 def db_upgrade(revision: str = "head") -> None:
     """Apply Alembic migrations."""

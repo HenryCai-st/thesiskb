@@ -22,6 +22,14 @@ audio:
   # its own timestamp, which is what citations point to (acceptance: within ±5 s).
   max_line_seconds: 0  # 0 = one line per sentence
 
+# Entities (ADR 0014/0015): near-duplicate names ("GAN" / "GANs") are merged after each ingest.
+# Before the first merge of a run the entity graph is saved to data/backups/entities/;
+# `tkb entities restore <file>` switches back. Set auto_merge: false to keep restored graphs as
+# they are (only names with the same key are matched).
+entities:
+  auto_merge: true
+  keep_snapshots: 10
+
 retrieval:
   hybrid_top_k: 30
   rerank_top_k: 8

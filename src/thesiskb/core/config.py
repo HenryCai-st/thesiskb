@@ -87,6 +87,11 @@ class RetrievalConfig(BaseModel):
     min_rerank_score: float = 0.02  # below this the answer path refuses instead of generating
 
 
+class EntitiesConfig(BaseModel):
+    auto_merge: bool = True  # merge near-duplicate entity names after each ingest (ADR 0014)
+    keep_snapshots: int = 10  # automatic graph snapshots kept in data/backups/entities/
+
+
 class PipelineConfig(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -96,6 +101,7 @@ class PipelineConfig(BaseModel):
     pipeline_version: str = "0.1.0"
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    entities: EntitiesConfig = Field(default_factory=EntitiesConfig)
 
 
 class Person(BaseModel):

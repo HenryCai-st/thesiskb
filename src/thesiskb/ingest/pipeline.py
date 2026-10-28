@@ -31,6 +31,7 @@ from thesiskb.ingest.chunking import ChunkDraft, chunk_blocks, get_token_counter
 from thesiskb.ingest.detect import DOCUMENT_MODALITIES, DetectedFile, register
 from thesiskb.ingest.documents import FTS_CONFIG, detect_language, document_meta, extract_blocks
 from thesiskb.ingest.entities import resolve_entities
+from thesiskb.ingest.entity_snapshots import save_snapshot
 from thesiskb.ingest.metadata import arxiv_id_from_name, lookup_arxiv
 from thesiskb.ingest.parsers import (
     ParseContext,
@@ -201,10 +202,15 @@ def ingest(
         if src.replaces and job_done(session, src, "extract" if extract else "embed"):
             retire_replaced(session, src, cfg)
 
-    # --- entities: embed new names, merge near-duplicates (ADR 0014) ---
-    if extract and session.scalar(select(Entity.id).where(Entity.embedding.is_(None)).limit(1)):
+    # --- entities: embed new names, merge near-duplicates (ADR 0014; snapshot first, 0015) ---
+    if (
+        extract
+        and cfg.entities.auto_merge
+        and session.scalar(select(Entity.id).where(Entity.embedding.is_(None)).limit(1))
+    ):
         try:
-            report["entities_merged"] = resolve_entities(session, gateway).merged
+            before = partial(save_snapshot, session, cfg, "before-merge")
+            report["entities_merged"] = resolve_entities(session, gateway, before).merged
             session.commit()
         except Exception as e:  # noqa: BLE001 — retried after the next ingest
             session.rollback()
