@@ -60,6 +60,12 @@ class Source(Base):
     replaces: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("sources.id", ondelete="SET NULL")
     )
+    # web pages: `origin` is the URL, this is when it was fetched; `person_id` = the person a
+    # web lookup was about (removed by forget-person)
+    retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL")
+    )
 
     __table_args__ = (Index("ix_sources_source_type", "source_type"),)
 

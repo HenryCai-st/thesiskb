@@ -1,0 +1,16 @@
+# SearXNG for ThesisKB's web search (Milestone 17, ADR 0018). Only reachable from this machine
+# (docker-compose.yml binds 127.0.0.1:8888). JSON output is what ThesisKB reads.
+use_default_settings: true
+
+server:
+  # set by the container from SEARXNG_SECRET (docker-compose.yml); only signs local cookies
+  secret_key: "set-by-environment"
+  limiter: false        # one local user; the limiter needs Redis
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json

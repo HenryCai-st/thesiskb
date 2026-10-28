@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     tesseract_cmd: str = "tesseract"
     tessdata_dir: str | None = None  # language packs folder if not the install default
     public_url: str | None = None  # base for links in chat replies; default: the request's URL
+    searxng_url: str = "http://localhost:8888"  # web search (M17): docker compose --profile web
     config_dir: Path = REPO_ROOT / "config"
     # which model setup to use, relative to config_dir: models.yaml (fully local, default) or
     # e.g. examples/models.api.yaml (cloud LLM, local KB)

@@ -107,9 +107,11 @@ class AskRequest(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    paths: list[str] = Field(default_factory=lambda: ["data/raw"])
+    paths: list[str] = Field(default_factory=lambda: ["data/raw"])  # or http(s) URLs
     source_type: str | None = None
     extract: bool = True
+    site: bool = False  # URLs: the whole site (same host)
+    max_pages: int = Field(50, ge=1, le=500)
 
 
 def source_out(s: Source) -> dict[str, Any]:
@@ -124,6 +126,7 @@ def source_out(s: Source) -> dict[str, Any]:
         "authors": s.authors,
         "published": s.published.isoformat() if s.published else None,
         "origin": s.origin,
+        "retrieved_at": s.retrieved_at.isoformat() if s.retrieved_at else None,
         "language": s.language,
         "verification_status": s.verification_status,
         "file_url": f"/files/{s.id}",
@@ -152,6 +155,9 @@ def citation_links(session: Session, chunk_id: uuid.UUID) -> dict[str, Any]:
         out["open_url"] = (
             f"/files/{src.id}?upright=1" if src.modality == "image" else out["file_url"]
         )
+    if (src.origin or "").startswith(("http://", "https://")):  # web page: the live original
+        live = src.origin + (text_fragment(chunk.text) if loc.get("part") is not None else "")
+        out["web_url"] = live
     return out
 
 
@@ -226,6 +232,14 @@ def ingest(req: IngestRequest, session: Session = Depends(get_session)) -> dict[
     """Queue an ingest of files/folders on the server; the worker runs one item at a time."""
     from thesiskb.ingest.queue import enqueue
 
+    urls = [p for p in req.paths if p.startswith(("http://", "https://"))]
+    if urls:  # web pages: fetched by the worker (M17)
+        if len(urls) != len(req.paths):
+            raise HTTPException(status_code=400, detail="send URLs and file paths separately")
+        item = enqueue(
+            session, "url", urls, site=req.site, max_pages=req.max_pages, extract=req.extract
+        )
+        return {"queued": item.id, "status_url": "/api/jobs"}
     missing = [p for p in req.paths if not Path(p).exists()]
     if missing:
         raise HTTPException(status_code=400, detail=f"not found on the server: {missing}")

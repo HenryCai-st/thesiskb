@@ -141,6 +141,8 @@ Part B — web search (only after the legal check):
 
 Acceptance (A): a saved URL ingests and its citation opens the snapshot at the right section. Acceptance (B): defined after the legal check.
 
+Acceptance (B), defined 2026-10-28 (legal check answered, section 4): a question that asks to search the web is routed to the `web` path only, its answer cites pages fetched for it, stored as `unverified` web sources with URL and retrieval time; a question that does not ask never reaches the web; pages fetched about a known person are deleted by `tkb forget-person`. Backend: SearXNG (ADR 0018).
+
 ## 4. Open questions (answer before or during the milestone; record as ADRs)
 
 ### Answers (user, 2026-10-27)

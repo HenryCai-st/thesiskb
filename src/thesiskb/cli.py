@@ -77,7 +77,7 @@ def doctor() -> None:
 
 @app.command()
 def ingest(
-    paths: list[Path] = typer.Argument(..., help="Files or folders, e.g. data/raw"),
+    paths: list[str] = typer.Argument(..., help="Files, folders (data/raw) or web page URLs"),
     source_type: str | None = typer.Option(
         None, "--type", help="paper|book|note|meeting|interview|demo (default: by file type)"
     ),
@@ -88,8 +88,12 @@ def ingest(
     local_only: bool = typer.Option(
         False, "--local-only", help="Never send these files' content to a cloud model"
     ),
+    site: bool = typer.Option(
+        False, "--site", help="For a URL: also its site's other pages (same host only)"
+    ),
+    max_pages: int = typer.Option(50, help="With --site: at most this many pages"),
 ) -> None:
-    """Ingest documents (PDF/Office), images, audio and video."""
+    """Ingest documents (PDF/Office), images, audio, video, and web pages (URLs)."""
     from collections import Counter
 
     from rich.logging import RichHandler
@@ -116,12 +120,19 @@ def ingest(
     set_console_handler(RichHandler(console=console, show_path=False, show_time=False))
     cfg = get_pipeline_config()
     modalities = supported_modalities(cfg)  # loads plug-ins (new file types) before detect
-    files = detect(paths)
+    urls = [p for p in paths if p.startswith(("http://", "https://"))]
+    files = detect([Path(p) for p in paths if p not in urls])
     supported = [f for f in files if f.modality in modalities]
     by_kind = Counter(f.modality for f in supported)
-    console.print(
-        f"Found {len(files)} files: " + ", ".join(f"{n} {m}" for m, n in sorted(by_kind.items()))
-    )
+    if files or not urls:
+        console.print(
+            f"Found {len(files)} files: "
+            + ", ".join(f"{n} {m}" for m, n in sorted(by_kind.items()))
+        )
+    if urls:
+        console.print(
+            f"Web: {len(urls)} URL(s)" + (f", whole site, up to {max_pages} pages" if site else "")
+        )
     for f in files:
         if f.modality not in modalities:
             console.print(f"  [dim]skip (no parser for {f.modality}): {f.path.name}[/]")
@@ -137,7 +148,8 @@ def ingest(
         TextColumn("{task.description}"),
     )
     with session_scope() as session, Progress(*columns, console=console) as bar:
-        total = bar.add_task("steps (file x stage)", total=len(supported) * (5 if extract else 4))
+        steps = len(supported) * (5 if extract else 4)
+        total = bar.add_task("steps (file x stage)", total=None if urls else steps)
         chunks = bar.add_task("", total=1, visible=False)
 
         def fit(text: str) -> str:  # the bar and counts take ~60 columns; cut only the label
@@ -168,6 +180,16 @@ def ingest(
                 local_only=local_only,
                 progress=progress,
             )
+            if urls:
+                from thesiskb.ingest.web import ingest_web
+
+                web, _, _ = ingest_web(
+                    session, urls, cfg, get_gateway(), site=site, max_pages=max_pages,
+                    progress=progress, extract=extract,
+                )  # fmt: skip
+                failed_files = report.pop("failed")
+                for k, v in web.items():
+                    report[k] = (report.get(k) or 0) + v if k != "failed" else failed_files + v
     console.print()  # end the progress-bar line
     failed = report.pop("failed")
     work = ", ".join(f"{stage}: {n}" for stage, n in report.items())
@@ -189,7 +211,8 @@ def ask(
     show_context: bool = typer.Option(False, help="Also print every retrieved passage"),
     as_json: bool = typer.Option(False, "--json", help="Print the full Answer as JSON"),
     path: str = typer.Option(
-        "auto", help="auto (router) | general | literature | person | task | entity | summary"
+        "auto",
+        help="auto (router) | general | literature | person | task | entity | summary | web",
     ),
 ) -> None:
     """Answer a question from the knowledge base, with citations."""
@@ -892,9 +915,12 @@ def forget_person(
         )
         sources = [session.get(Source, i) for i in source_ids]
         n_st = len(session.scalars(select(Statement.id).where(Statement.person_id == p.id)).all())
+        web = session.scalars(select(Source).where(Source.person_id == p.id)).all()
         console.print(
             f"[bold]{escape(p.name)}[/]: {n_st} statements, speaker in {len(sources)} "
-            f"recording(s): " + ", ".join(escape(s.path.rsplit("/", 1)[-1]) for s in sources)
+            f"recording(s): "
+            + ", ".join(escape(s.path.rsplit("/", 1)[-1]) for s in sources)
+            + (f"; {len(web)} web page(s) looked up about them (deleted)" if web else "")
         )
         if delete_recordings:
             console.print(
@@ -904,6 +930,10 @@ def forget_person(
         if not yes and not typer.confirm("Delete this person's data?"):
             raise typer.Exit(code=1)
 
+        for src in web:  # web lookups about the person: our snapshot copies go too
+            shutil.rmtree(processed_dir(cfg, src.sha256), ignore_errors=True)
+            Path(src.path).unlink(missing_ok=True)
+            session.delete(src)
         session.execute(delete(Statement).where(Statement.person_id == p.id))
         session.execute(
             update(Task).where(Task.owner_person_id == p.id).values(owner_person_id=None)

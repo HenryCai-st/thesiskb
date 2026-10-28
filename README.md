@@ -16,6 +16,7 @@ is optional.
 | "What does Prof. X prefer for the evaluation?" | person path: only what that person said (speaker-labelled transcripts) or wrote |
 | "Who does what until when?" / "When is my mid-term?" | tasks extracted from notes and meetings into a table, answered by SQL, sorted by date; add your own, plan towards a deadline, see them by week or month |
 | "Which datasets / products appear in my sources?" | entities and relations extracted at ingestion, queried with SQL; spelling variants merged into one entity, browsable in the web UI's Graph tab |
+| "Search the web for …" | only when asked: a private SearXNG search, the top pages saved as unverified sources and cited |
 | anything else | hybrid search (vectors + keywords) over all sources, reranked |
 
 Models are chosen per component in the web UI's Models tab (sizes and VRAM shown before

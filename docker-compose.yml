@@ -17,5 +17,19 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Web search for questions that ask for it (M17). Optional: docker compose --profile web up -d
+  searxng:
+    image: searxng/searxng:2026.10.11-ad46ebd7d
+    container_name: thesiskb-searxng
+    profiles: ["web"]
+    environment:
+      SEARXNG_SECRET: ${TKB_SEARXNG_SECRET:-thesiskb-local-only}
+      SEARXNG_BASE_URL: http://localhost:8888/
+    ports:
+      - "127.0.0.1:8888:8080"  # this machine only
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+
 volumes:
   pgdata:

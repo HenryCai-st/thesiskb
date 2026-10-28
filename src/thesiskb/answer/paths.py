@@ -11,6 +11,8 @@ citation/support checks. Multi-path questions therefore need no special handling
               authored, searched with the question
   task        open tasks from SQL, sorted by due date
   summary     whole-document questions: the source's summary plus every part's summary, in order
+  web         only when asked ("search the web for …"): SearXNG results fetched and ingested as
+              unverified sources, then searched (answer/web.py)
 """
 
 from __future__ import annotations
@@ -406,6 +408,12 @@ def task_ctx(session, gateway, question, cfg, filters, route) -> Ctx:
     )
 
 
+def web_ctx(*args) -> Ctx:
+    from thesiskb.answer.web import web_ctx as provider  # imported late: optional path
+
+    return provider(*args)
+
+
 PROVIDERS: dict[str, Callable[..., Ctx]] = {
     "general": general_ctx,
     "literature": literature_ctx,
@@ -413,6 +421,7 @@ PROVIDERS: dict[str, Callable[..., Ctx]] = {
     "task": task_ctx,
     "entity": entity_ctx,
     "summary": summary_ctx,
+    "web": web_ctx,
 }
 
 
@@ -465,7 +474,7 @@ def _answer(session, gateway, question, cfg, filters, path, verify_support, stat
         route = route_question(session, gateway, question)
     else:
         route = Route(paths=[path], by="forced")
-        if path == "person":
+        if path in ("person", "web"):  # web: pages about a known person are linked to them
             forced = route_question(session, None, question, use_llm=False)
             route.person, route.person_id = forced.person, forced.person_id
     timings = {"route": time.perf_counter() - t0}

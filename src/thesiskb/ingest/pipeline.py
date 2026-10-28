@@ -115,6 +115,7 @@ def ingest(
     extract: bool = True,
     local_only: bool = False,
     progress: Callable[..., None] | None = None,
+    summarize: bool = True,
 ) -> IngestReport:
     """`progress(stage, filename)` is called once per file and stage (also when skipped or
     failed, so a bar always completes); `progress("extract", filename, i, n)` per chunk."""
@@ -170,7 +171,12 @@ def ingest(
     for src, f in sources:
         if job_done(session, src, "chunk"):
             on_part = partial(step, "summarize", f.name)
-            work = partial(_summarize_source, session, src, cfg, gateway, on_part)
+            # web search results skip it (answer now); the stage still counts as done
+            work = (
+                partial(_summarize_source, session, src, cfg, gateway, on_part)
+                if summarize
+                else (lambda: None)
+            )
             if _safe(report, session, src, f, "summarize", work, force):
                 report["summarize"] += 1
                 # new summary chunks need vectors (extraction skips summaries: keep it)

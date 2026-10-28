@@ -55,8 +55,30 @@ class Transcript(BaseModel):
     speakers: list[str] = Field(default_factory=list)
 
 
+def has_audio(src: Path, ffprobe: str = "ffprobe") -> bool:
+    out = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+         "-of", "csv=p=0", str(src)],
+        capture_output=True, text=True, check=True,
+    ).stdout  # fmt: skip
+    return bool(out.strip())
+
+
 def extract_wav(src: Path, wav: Path, ffmpeg: str = "ffmpeg") -> Path:
+    """16 kHz mono WAV. A video without sound (a silent screen recording or product demo)
+    gets silence of the same length: no words, but its keyframes are still read."""
     wav.parent.mkdir(parents=True, exist_ok=True)
+    if not has_audio(src, ffmpeg.replace("ffmpeg", "ffprobe")):
+        from thesiskb.ingest.video import _probe_duration
+
+        seconds = max(_probe_duration(src, ffmpeg.replace("ffmpeg", "ffprobe")), 0.1)
+        subprocess.run(
+            [ffmpeg, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+             f"anullsrc=r={SAMPLE_RATE}:cl=mono", "-t", f"{seconds:.2f}", "-c:a", "pcm_s16le",
+             str(wav)],
+            check=True,
+        )  # fmt: skip
+        return wav
     subprocess.run(
         [
             ffmpeg,

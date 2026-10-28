@@ -56,10 +56,14 @@ def load_gold(path: Path) -> tuple[dict[str, str], list[GoldQuestion]]:
 
 
 def _source_by_filename(session: Session) -> dict[str, list[Source]]:
-    """File name → its sources (several for a meeting CSV: one per row, path "<file>#<row>")."""
+    """File name → its sources (several for a meeting CSV: one per row, path "<file>#<row>").
+    Web snapshots are all called main.html: they are also found as "web/<host>/<page>/main.html"."""
     out: dict[str, list[Source]] = {}
     for s in session.scalars(select(Source)):
-        out.setdefault(s.path.split("#", 1)[0].rsplit("/", 1)[-1], []).append(s)
+        path = s.path.split("#", 1)[0]
+        out.setdefault(path.rsplit("/", 1)[-1], []).append(s)
+        if "/web/" in path:
+            out.setdefault("web/" + path.split("/web/", 1)[1], []).append(s)
     return out
 
 

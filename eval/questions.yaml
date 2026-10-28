@@ -17,6 +17,7 @@ fixtures:
   dgx_audio: "Sparking Something Big_ NVIDIA DGX Spark Has Arrived.mp3"
   sample_epub: minimal.epub                      # "Sample .epub Book": 2 lorem-ipsum chapters + copyright page
   sideby_html: "SideBy _ Vivien Cai Portfolio.html"  # saved page of viviencai.com/projects/sideby
+  sideby_web: web/www.viviencai.com/projects-sideby/main.html  # the same page via tkb ingest <url> (M17)
   voros: Voros-GenericForesightProcess.pdf      # Voros, "A generic foresight process framework" (19 p.)
   granola_csv: granola-export-test.csv           # Granola export: AI summary + transcript per meeting (ingested from M13)
 
@@ -203,7 +204,7 @@ questions:
       the solution?
     type: general
     path: [general]
-    expected_sources: [sideby_html]
+    expected_sources: [sideby_html, sideby_web]  # either counts as a hit
     expected_facts:
       - Problem - therapy feels intimidating/overwhelming at the start; fear of judgment and stigma keep people from seeking help (depression affects over 280 million people)
       - Design - an app built on empowerment, connection, encouragement and simplicity (self-disclosure, goal setting, progress, low cognitive load) that supports people before and during therapy and connects them with therapists

@@ -132,6 +132,37 @@ def run_item(engine, item_id: int, gateway=None) -> None:
             if item.kind == "model":
                 _run_model_item(session, status, item_id, opts)
                 return
+            if item.kind == "url":
+                from thesiskb.ingest.web import ingest_web
+
+                total = 0  # unknown until the pages are fetched
+
+                def web_progress(stage, name, done=None, of=None):
+                    p = {"stage": stage, "file": name, "steps": state["steps"], "total": total}
+                    if done is None:
+                        state["steps"] += 1
+                    else:
+                        p |= {"done": done, "of": of}
+                    if time.monotonic() - state["last"] >= PROGRESS_EVERY:
+                        state["last"] = time.monotonic()
+                        status.execute(
+                            update(QueueItem).where(QueueItem.id == item_id).values(progress=p)
+                        )
+                        status.commit()
+
+                report, sources, failed = ingest_web(
+                    session, item.paths, cfg, gateway, site=opts.get("site", False),
+                    max_pages=opts.get("max_pages", 50), progress=web_progress,
+                    extract=opts.get("extract", True),
+                )  # fmt: skip
+                report.pop("failed", None)
+                item = session.get(QueueItem, item_id)
+                item.report = dict(report) | {"sources": len(sources), "failed": failed}
+                item.status = "done" if sources else "failed"
+                item.error = "; ".join(f"{u}: {e}" for u, e in failed)[:2000] or None
+                item.finished_at = _now()
+                session.commit()
+                return
             files, force = files_for(session, item, cfg)
             total = len(files) * (len(STAGES) - (0 if opts.get("extract", True) else 1))
 

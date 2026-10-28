@@ -57,6 +57,16 @@ _TASK_WORDS = re.compile(
     re.I,
 )
 
+# "search the web for…", "look up X online", "im Internet suchen": the only way to the web path
+# (M17); the LLM router never chooses it
+WEB_WORDS = re.compile(
+    r"\b(search|look\s*up|check|find)\b(\s+\w+){0,6}?\s+(on\s+|in\s+)?(the\s+)?"
+    r"(web|internet|online)\b|\bweb\s*search\b|\bsearch\s+online\b"
+    r"|\b(such\w*|recherchier\w*|schau\w*)\b(\s+\w+){0,6}?\s+(im\s+)?(web|internet|online)\b"
+    r"|\b(im|in the)\s+(web|internet)\s+(nach|suchen|recherchieren)\b",
+    re.I,
+)
+
 _LITERATURE_WORDS = re.compile(
     r"\b(papers?|survey|literature|research|study|studies|publication|state of the art|sota|"
     r"method|approach|forschung|literatur|veröffentlichung)\b",
@@ -181,6 +191,9 @@ def route_question(
 ) -> Route:
     people = known_people(session)
     route = rule_route(question, people)
+    if WEB_WORDS.search(question):  # asked for explicitly: the web only (person kept for linking)
+        route.paths, route.reason = ["web"], "asked to search the web"
+        return route
     llm = llm_route(gateway, question, people) if (use_llm and gateway) else None
     if llm:
         paths = list(dict.fromkeys([*[p for p in route.paths if p != "general"], *llm.paths]))

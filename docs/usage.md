@@ -44,6 +44,22 @@ queue. `tkb ingest` in a terminal waits if the queue is busy, and vice versa.
 the old one once it is fully processed. Tasks you confirmed or marked done are kept, and
 speaker names carry over.
 
+**Web pages**: give a URL instead of a path (or use *Add URL* in the Sources tab).
+
+```bash
+uv run tkb ingest https://www.viviencai.com/projects/sideby
+uv run tkb ingest https://www.viviencai.com --site --max-pages 50   # the whole site
+```
+
+The page is fetched once and saved under `data/raw/web/<host>/<page>/`: its main text
+(navigation, footers and "more projects" cards left out), its own images, and video/audio files
+it links directly on the same site. Citations open that saved copy at the cited passage, with a
+link to the live page. `--site` stays on the same host, reads the sitemap first and stops after
+`--max-pages`; each page becomes its own source. robots.txt is obeyed and requests are spaced
+out. Pages that only show text after JavaScript runs need the web extra once:
+`uv sync --extra web` and `uv run playwright install chromium`. Ingest the URL again to update
+it; a changed page replaces the old copy.
+
 Source types steer answering: `paper`/`book` feed the literature path, `meeting`/`interview`/`note`
 are scanned for tasks. Defaults: e-books → book, web pages → web, other documents → paper, photos → note, audio and meeting CSVs → meeting, video → demo.
 
@@ -222,6 +238,22 @@ Open WebUI or any OpenAI client: base URL `http://localhost:8000/v1`, model `the
   their recordings without the name. `--delete-recordings` removes those recordings from the
   index; delete the original files yourself.
 - Never commit `data/`, `.env` or recordings; the repo's `.gitignore` already excludes them.
+
+### Searching the web
+
+Only when you ask for it: start the question with "Search the web for …", "Look up … online"
+(German: "Such im Internet nach …"), or pick the *web* path in the web UI / `tkb ask --path web`.
+ThesisKB then asks a private search engine running on your machine, fetches the top pages
+(robots.txt respected), adds them as **unverified** web sources and answers from them with
+citations like any other source. Start the search engine once:
+
+```bash
+docker compose --profile web up -d     # SearXNG on localhost:8888
+```
+
+If the question names someone in `people.yaml`, the pages are linked to that person and
+`tkb forget-person` deletes them. Pages stay in the knowledge base; `tkb verify` them if you
+checked them.
 
 ### Choosing models
 

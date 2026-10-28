@@ -140,7 +140,7 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
         <button class="primary" id="go">Ask</button>
         <select id="path" title="Answer path">
           <option value="auto">auto (router)</option><option>general</option>
-          <option>literature</option><option>person</option><option>task</option><option>entity</option><option>summary</option>
+          <option>literature</option><option>person</option><option>task</option><option>entity</option><option>summary</option><option>web</option>
         </select>
         <label class="muted"><input type="checkbox" id="verified"> verified sources only</label>
         <span class="muted" id="timer"></span>
@@ -164,6 +164,12 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
         <button class="primary" id="ingest-go">Ingest</button>
       </div>
       <p class="muted" style="margin:6px 0 0">New and changed files in that folder are added; unchanged ones are skipped. A changed file replaces its old version (confirmed tasks are kept).</p>
+      <div class="row">
+        <input id="url-in" type="url" placeholder="Add URL: https://…" title="A web page to fetch once and keep as a source" style="flex:1;min-width:180px;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text)">
+        <label class="muted" title="Also the site's other pages (same host, sitemap first, at most 50)"><input type="checkbox" id="url-site"> whole site</label>
+        <button class="primary" id="url-go">Add URL</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0">The page is saved under data/raw/web/ (main text, its images and videos) and cited from that copy. robots.txt is respected.</p>
       <div id="queue" style="margin:12px 0"></div>
       <table><thead><tr><th>File</th><th>Type</th><th>Chunks</th><th>Stages</th><th></th></tr></thead>
         <tbody id="sources"></tbody></table>
@@ -364,12 +370,13 @@ function showChunk(chunk, t, passageText) {
     media = `<${s.modality} controls preload="metadata" src="${file}" data-t="${t ?? 0}"></${s.modality}>
       <div class="muted">starts at ${ts(t ?? 0)}</div>`;
   } else if (loc.part != null && chunk.links && chunk.links.open_url) {
-    media = `<p class="muted"><a href="${withToken(chunk.links.open_url)}" target="_blank">open the document at this passage</a> · <a href="${file}" target="_blank">original file</a></p>`;
+    media = `<p class="muted"><a href="${withToken(chunk.links.open_url)}" target="_blank">open ${s.origin && /^https?:/.test(s.origin) ? "the saved copy" : "the document"} at this passage</a> · <a href="${file}" target="_blank">original file</a></p>`;
   } else {
     media = `<p><a href="${file}" target="_blank">open file</a></p>`;
   }
   $("#viewer").innerHTML = `<h3>${esc(s.title || s.filename)}</h3>
     <div class="muted">${esc(s.filename)} · ${esc(where(loc))} ${s.authors ? " · " + esc(s.authors.slice(0, 3).join(", ")) + (s.authors.length > 3 ? " et al." : "") : ""}</div>
+    ${chunk.links && chunk.links.web_url ? `<div class="muted">web page, retrieved ${esc((s.retrieved_at || "").slice(0, 10))} · <a href="${esc(chunk.links.web_url)}" target="_blank" rel="noopener noreferrer">open the live page</a> · ${esc(s.verification_status)}</div>` : ""}
     ${media}
     <div class="muted" style="margin-top:8px">${esc(chunk.context_header || "")}</div>
     <pre class="passage">${esc(passageText || chunk.text)}</pre>`;
@@ -610,7 +617,8 @@ let queueTimer = null, queueActive = false;
 async function loadQueue() {
   const items = await api("/api/jobs?limit=8");
   const label = (q) => q.kind === "reingest" ? "re-ingest " + (q.paths[0] || "").split("/").pop()
-    : q.kind === "model" ? `model: ${(q.options || {}).component} → ${(q.options || {}).option}` : "ingest " + q.paths.join(", ");
+    : q.kind === "model" ? `model: ${(q.options || {}).component} → ${(q.options || {}).option}`
+    : q.kind === "url" ? ((q.options || {}).site ? "site " : "web ") + q.paths.join(", ") : "ingest " + q.paths.join(", ");
   $("#queue").innerHTML = items.length ? '<div class="muted">Ingest queue (one at a time; questions wait while it runs)</div>' + items.map((q) => {
     const p = q.progress || {};
     const pct = p.total ? Math.round(100 * p.steps / p.total) : 0;
@@ -628,6 +636,13 @@ async function loadQueue() {
   queueActive = active;
 }
 
+$("#url-go").onclick = async () => {
+  const url = $("#url-in").value.trim();
+  if (!/^https?:\/\//.test(url)) { alert("Enter a URL starting with http:// or https://"); return; }
+  try { await api("/api/ingest", { method: "POST", body: JSON.stringify({ paths: [url], site: $("#url-site").checked }) }); $("#url-in").value = ""; }
+  catch (e) { alert(e.message); }
+  loadQueue();
+};
 $("#ingest-go").onclick = async () => {
   const path = $("#ingest-path").value.trim();
   if (!path) return;
