@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from thesiskb.answer.generate import REFUSAL, Answer, Citation, generate_from
 from thesiskb.core.models import Chunk, Person, Source, Task
 from thesiskb.llm.gateway import LLMGateway
+from thesiskb.planning import visible_tasks
 
 TASK_RULES = """- "Task:" passages are rows of the user's task table, already sorted by due date. \
 Keep that (chronological) order when listing several. State each date as written in the source \
@@ -30,7 +31,7 @@ def open_tasks(session: Session, include_done: bool = False) -> list[tuple[Task,
     )
     if not include_done:
         stmt = stmt.where(Task.status != "done")
-    return list(session.execute(stmt).all())
+    return list(session.execute(stmt.where(visible_tasks())).all())  # no unaccepted plan items
 
 
 def task_row_text(t: Task, owner: str | None) -> str:

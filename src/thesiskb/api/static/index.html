@@ -79,6 +79,32 @@ details.trace { margin-top: 10px; font-size: 13.5px; }
 details.trace summary { cursor: pointer; color: var(--accent); }
 details.trace h4 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
 details.trace .q { font: 13px var(--mono); overflow-wrap: anywhere; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { font: inherit; border: 0; background: var(--panel); color: var(--muted); padding: 5px 10px; cursor: pointer; }
+.seg button.on { background: var(--accent-soft); color: var(--text); }
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.cal .day { border: 1px solid var(--line); border-radius: 6px; padding: 4px 5px; min-height: 92px; background: var(--bg); min-width: 0; }
+.cal .day.today { border-color: var(--accent); }
+.cal .day.out { opacity: .45; }
+.cal .dn { font-size: 12px; color: var(--muted); }
+.cal .head { font-size: 12px; color: var(--muted); text-align: center; }
+.item { display: block; width: 100%; text-align: left; font: 12.5px/1.35 inherit; margin: 3px 0; padding: 2px 5px;
+  border-radius: 4px; border: 0; background: var(--accent-soft); color: var(--text); cursor: pointer; overflow-wrap: anywhere; }
+.item.span { background: color-mix(in srgb, var(--accent) 9%, transparent); color: var(--muted); }
+.item.done { text-decoration: line-through; opacity: .6; }
+.item.plan { border-left: 3px solid var(--warn); }
+.month .week { display: contents; }
+.month .week.on .day { border-color: var(--accent); }
+.month .day { min-height: 64px; cursor: pointer; }
+.dots { font-size: 11.5px; color: var(--accent); overflow-wrap: anywhere; }
+.form label { display: block; font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+.form input, .form select, .form textarea { width: 100%; font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; }
+.form .pick { max-height: 180px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; }
+.form .pick label { color: var(--text); margin: 2px 0; font-size: 13.5px; }
+.form .pick input { width: auto; margin-right: 6px; }
+.prop { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 8px; background: var(--warn-soft); }
+@media (max-width: 600px) { .cal { grid-template-columns: minmax(0, 1fr); } .cal .head { display: none; } .month.cal { grid-template-columns: repeat(7, minmax(0, 1fr)); } .month .day { min-height: 40px; } }
 #graph { height: 62vh; overflow: hidden; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 .chip { font-size: 13px; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel);
   color: var(--text); cursor: pointer; }
@@ -116,8 +142,13 @@ details.trace .hit { font: 12.5px var(--mono); color: var(--muted); margin-left:
     </div>
 
     <div class="card hidden" id="tab-tasks">
-      <table><thead><tr><th>Due</th><th>Written</th><th>Task</th><th>Owner</th><th></th></tr></thead>
-        <tbody id="tasks"></tbody></table>
+      <div class="row" style="margin-top:0">
+        <span class="seg" id="task-views"><button data-view="week" class="on">Week</button><button data-view="month">Month</button><button data-view="list">List</button></span>
+        <button class="small" id="task-new">+ New task</button>
+        <button class="small" id="plan-new">Plan towards a deadline</button>
+      </div>
+      <div id="proposals"></div>
+      <div id="task-view" style="margin-top:10px"></div>
     </div>
 
     <div class="card hidden" id="tab-sources">
@@ -333,22 +364,213 @@ function showChunk(chunk, t, passageText) {
   }
 }
 
-// --- tasks ---
+// --- tasks: week / month / list views, edit form, plans, proposals ---
+let taskRows = [], taskView = "week", weekStart = mondayOf(new Date()), monthStart = firstOfMonth(new Date()), openWeek = null;
+function mondayOf(d) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+function firstOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const fmtDay = (d, opts) => d.toLocaleDateString(undefined, opts);
+
 async function loadTasks() {
-  const rows = await api("/api/tasks?include_done=true");
-  $("#tasks").innerHTML = rows.map((t) => `<tr>
-    <td>${t.due_date ?? "—"}</td><td class="muted">${esc(t.due_raw ?? "")}</td>
+  taskRows = await api("/api/tasks?include_done=true");
+  loadProposals();
+  renderTasks();
+}
+
+function renderTasks() {
+  document.querySelectorAll("#task-views button").forEach((b) => b.classList.toggle("on", b.dataset.view === taskView));
+  if (taskView === "week") renderWeek();
+  else if (taskView === "month") renderMonth();
+  else renderList();
+  $("#task-view").querySelectorAll("[data-task]").forEach((b) => b.onclick = (e) => { e.preventDefault(); editTask(b.dataset.task); });
+}
+
+// tasks on a day: due that day, or (with a start date) spanning it
+function tasksOn(day) {
+  const k = isoDay(day);
+  return taskRows.filter((t) => t.due_date === k || (t.start_date && t.due_date && t.start_date <= k && k < t.due_date))
+    .map((t) => ({ t, span: t.due_date !== k }));
+}
+const itemHtml = ({ t, span }) => `<button class="item${span ? " span" : ""}${t.status === "done" ? " done" : ""}${t.origin === "plan" ? " plan" : ""}" data-task="${t.id}" title="${esc(t.description)}">${span ? "… " : ""}${esc(t.description)}</button>`;
+
+function renderWeek() {
+  const days = [...Array(7)].map((_, i) => addDays(weekStart, i));
+  const today = isoDay(new Date());
+  const undated = taskRows.filter((t) => !t.due_date && t.status !== "done");
+  $("#task-view").innerHTML = `<div class="row" style="margin:0 0 8px">
+      <button class="small" id="wk-prev" title="Previous week">◀</button>
+      <button class="small" id="wk-now">This week</button>
+      <button class="small" id="wk-next" title="Next week">▶</button>
+      <span class="muted">${fmtDay(days[0], { day: "numeric", month: "short" })} – ${fmtDay(days[6], { day: "numeric", month: "short", year: "numeric" })}</span></div>
+    <div class="cal">${days.map((d) => `<div class="day${isoDay(d) === today ? " today" : ""}">
+      <div class="dn">${fmtDay(d, { weekday: "short", day: "numeric" })}</div>${tasksOn(d).map(itemHtml).join("")}</div>`).join("")}</div>
+    ${undated.length ? `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">No date (${undated.length})</summary>${undated.map((t) => itemHtml({ t, span: false })).join("")}</details>` : ""}`;
+  $("#wk-prev").onclick = () => { weekStart = addDays(weekStart, -7); renderTasks(); };
+  $("#wk-next").onclick = () => { weekStart = addDays(weekStart, 7); renderTasks(); };
+  $("#wk-now").onclick = () => { weekStart = mondayOf(new Date()); renderTasks(); };
+}
+
+function renderMonth() {
+  const first = mondayOf(monthStart), month = monthStart.getMonth(), today = isoDay(new Date());
+  const weeks = [];
+  for (let w = first; w.getMonth() === month || w < monthStart; w = addDays(w, 7)) weeks.push(w);
+  const heads = [...Array(7)].map((_, i) => `<div class="head">${fmtDay(addDays(first, i), { weekday: "short" })}</div>`).join("");
+  $("#task-view").innerHTML = `<div class="row" style="margin:0 0 8px">
+      <button class="small" id="mo-prev" title="Previous month">◀</button>
+      <button class="small" id="mo-now">This month</button>
+      <button class="small" id="mo-next" title="Next month">▶</button>
+      <span class="muted">${fmtDay(monthStart, { month: "long", year: "numeric" })} · hover or click a week to see its tasks</span></div>
+    <div class="cal month">${heads}${weeks.map((w) => `<div class="week${openWeek === isoDay(w) ? " on" : ""}" data-week="${isoDay(w)}">${[...Array(7)].map((_, i) => {
+      const d = addDays(w, i), n = tasksOn(d).filter((x) => !x.span).length;
+      return `<div class="day${d.getMonth() !== month ? " out" : ""}${isoDay(d) === today ? " today" : ""}" data-week="${isoDay(w)}"><div class="dn">${d.getDate()}</div>${n ? `<div class="dots">${"●".repeat(Math.min(n, 4))}${n > 4 ? "+" : ""}</div>` : ""}</div>`;
+    }).join("")}</div>`).join("")}</div>
+    <div id="week-tasks" style="margin-top:10px"></div>`;
+  const show = (wk) => {
+    const days = [...Array(7)].map((_, i) => addDays(new Date(wk + "T00:00"), i));
+    const rows = days.flatMap((d) => tasksOn(d).filter((x) => !x.span).map((x) => ({ ...x, d })));
+    $("#week-tasks").innerHTML = `<div class="muted">Week of ${fmtDay(days[0], { day: "numeric", month: "short" })}</div>` +
+      (rows.map((x) => `<div style="display:flex;gap:8px;align-items:baseline"><span class="muted" style="min-width:64px">${fmtDay(x.d, { weekday: "short", day: "numeric" })}</span>${itemHtml(x)}</div>`).join("") || '<p class="muted">Nothing due this week.</p>');
+    $("#week-tasks").querySelectorAll("[data-task]").forEach((b) => b.onclick = () => editTask(b.dataset.task));
+  };
+  $("#task-view").querySelectorAll(".day[data-week]").forEach((c) => {
+    c.onmouseenter = () => show(c.dataset.week);
+    c.onclick = () => { openWeek = c.dataset.week; renderTasks(); show(openWeek); };
+  });
+  if (openWeek) show(openWeek);
+  $("#mo-prev").onclick = () => { monthStart = new Date(monthStart.getFullYear(), month - 1, 1); openWeek = null; renderTasks(); };
+  $("#mo-next").onclick = () => { monthStart = new Date(monthStart.getFullYear(), month + 1, 1); openWeek = null; renderTasks(); };
+  $("#mo-now").onclick = () => { monthStart = firstOfMonth(new Date()); openWeek = null; renderTasks(); };
+}
+
+function renderList() {
+  $("#task-view").innerHTML = `<table><thead><tr><th>Due</th><th>Written</th><th>Task</th><th>Owner</th><th></th></tr></thead><tbody>${taskRows.map((t) => `<tr>
+    <td>${t.due_date ?? "—"}${t.start_date ? `<div class="muted">from ${t.start_date}</div>` : ""}</td><td class="muted">${esc(t.due_raw ?? "")}</td>
     <td>${t.status === "done" ? "<s>" + esc(t.description) + "</s>" : esc(t.description)}
-      ${t.confirmed ? '<span class="tag">confirmed</span>' : ""}
-      <div class="muted">“${esc(t.evidence_quote ?? "")}” ${t.chunk_id ? `<a href="#" data-chunk="${t.chunk_id}">source</a>` : ""}</div></td>
+      ${t.confirmed ? '<span class="tag">confirmed</span>' : ""} ${t.origin !== "extracted" ? `<span class="tag">${esc(t.origin)}</span>` : ""}
+      ${t.evidence_quote ? `<div class="muted">“${esc(t.evidence_quote)}” ${t.chunk_id ? `<a href="#" data-chunk="${t.chunk_id}">source</a>` : ""}</div>` : ""}
+      ${t.notes ? `<div class="muted">${esc(t.notes)}</div>` : ""}</td>
     <td>${esc(t.owner ?? "")}</td>
     <td>${t.confirmed ? "" : `<button class="small" data-act="confirm" data-id="${t.id}">confirm</button>`}
-        ${t.status === "done" ? `<button class="small" data-act="reopen" data-id="${t.id}">reopen</button>` : `<button class="small" data-act="done" data-id="${t.id}">done</button>`}</td>
-  </tr>`).join("") || '<tr><td colspan="5" class="muted">No tasks yet.</td></tr>';
-  $("#tasks").querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
+        ${t.status === "done" ? `<button class="small" data-act="reopen" data-id="${t.id}">reopen</button>` : `<button class="small" data-act="done" data-id="${t.id}">done</button>`}
+        <button class="small" data-task="${t.id}">edit</button></td>
+  </tr>`).join("") || '<tr><td colspan="5" class="muted">No tasks yet.</td></tr>'}</tbody></table>`;
+  $("#task-view").querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
     await api(`/api/tasks/${b.dataset.id}/${b.dataset.act}`, { method: "POST" }); loadTasks(); });
-  $("#tasks").querySelectorAll("[data-chunk]").forEach((a) => a.onclick = async (e) => {
+  $("#task-view").querySelectorAll("[data-chunk]").forEach((a) => a.onclick = async (e) => {
     e.preventDefault(); const ch = await api(`/api/chunks/${a.dataset.chunk}`); showChunk(ch, ch.locator.t_start); });
+}
+document.querySelectorAll("#task-views button").forEach((b) => b.onclick = () => { taskView = b.dataset.view; renderTasks(); });
+
+// add / edit in the side panel
+function editTask(id) {
+  const t = taskRows.find((x) => x.id === id) || { description: "", status: "open", origin: "manual" };
+  const field = (name, label, type = "text", value = t[name] ?? "") =>
+    `<label>${label}<input name="${name}" type="${type}" value="${esc(value)}"${type === "number" ? ' step="0.5" min="0"' : ""}></label>`;
+  $("#viewer").innerHTML = `<h3>${id ? "Edit task" : "New task"}</h3>
+    ${t.origin === "extracted" && t.evidence_quote ? `<div class="muted">From a source: “${esc(t.evidence_quote)}” ${t.chunk_id ? `<a href="#" id="ed-src">open</a>` : ""}</div>` : ""}
+    <form class="form" id="ed">
+      ${field("description", "Task")}
+      ${field("owner", "Owner")}
+      <div class="row" style="margin:0">
+        <div style="flex:1;min-width:130px">${field("start_date", "Start", "date")}</div>
+        <div style="flex:1;min-width:130px">${field("due_date", "Due", "date")}</div>
+      </div>
+      ${t.due_raw ? `<div class="muted">written in the source: ${esc(t.due_raw)}</div>` : ""}
+      <div class="row" style="margin:0">
+        <div style="flex:1;min-width:110px">${field("estimate_hours", "Estimate (hours)", "number")}</div>
+        <div style="flex:1;min-width:110px"><label>Status<select name="status"><option${t.status === "open" ? " selected" : ""}>open</option><option${t.status === "done" ? " selected" : ""}>done</option></select></label></div>
+      </div>
+      <label>Notes<textarea name="notes">${esc(t.notes ?? "")}</textarea></label>
+      <div class="row"><button class="primary">Save</button>${id ? '<button class="small" type="button" id="ed-del">Delete</button>' : ""}<span class="muted" id="ed-msg"></span></div>
+    </form>`;
+  if ($("#ed-src")) $("#ed-src").onclick = async (e) => { e.preventDefault(); const ch = await api(`/api/chunks/${t.chunk_id}`); showChunk(ch, ch.locator.t_start); };
+  $("#ed").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    const body = { clear: [] };
+    for (const k of ["description", "owner", "start_date", "due_date", "estimate_hours", "notes", "status"]) {
+      const v = (f[k] ?? "").trim();
+      if (v) body[k] = k === "estimate_hours" ? +v : v;
+      else if (k !== "description" && k !== "status" && (t[k] ?? "") !== "") body.clear.push(k);
+    }
+    try {
+      await api(id ? `/api/tasks/${id}` : "/api/tasks", { method: id ? "PATCH" : "POST", body: JSON.stringify(body) });
+      $("#ed-msg").textContent = "saved"; loadTasks();
+    } catch (err) { $("#ed-msg").textContent = err.message; }
+  };
+  if ($("#ed-del")) $("#ed-del").onclick = async () => {
+    if (!confirm(`Delete "${t.description}"?`)) return;
+    await api(`/api/tasks/${id}`, { method: "DELETE" });
+    $("#viewer").innerHTML = '<p class="muted">Deleted.</p>'; loadTasks();
+  };
+}
+$("#task-new").onclick = () => editTask(null);
+
+// plan towards a deadline
+async function planForm() {
+  const open = taskRows.filter((t) => t.status !== "done");
+  const goals = open.filter((t) => t.due_date);
+  const sources = await api("/api/sources");
+  $("#viewer").innerHTML = `<h3>Plan towards a deadline</h3>
+    <p class="muted">The model splits the tasks into parts with hour estimates; the dates are computed backwards from the deadline. Nothing is added until you accept.</p>
+    <form class="form" id="pl">
+      <label>Goal (a task with a due date)<select name="goal">${goals.map((t) => `<option value="${t.id}">${esc(t.description)} — ${t.due_date}</option>`).join("")}</select></label>
+      <label>It depends on — tick in the order they must be done</label><div class="pick" id="pl-deps"></div>
+      <label>Material to work through (optional)</label><div class="pick">${sources.map((s) => `<label><input type="checkbox" name="src" value="${s.id}">${esc(s.title || s.filename)}</label>`).join("")}</div>
+      <div class="row" style="margin:0"><div style="flex:1;min-width:110px"><label>Hours per week<input name="hours" type="number" value="10" min="1" step="1"></label></div>
+        <div style="flex:2;min-width:180px"><label>Leave out (days, ranges, weeks)<input name="exclude" placeholder="2026-12-24..2026-12-26, 2026-W52"></label></div></div>
+      <div class="row"><button class="primary" id="pl-go">Propose plan</button><span class="muted" id="pl-msg"></span></div>
+    </form><div id="pl-out"></div>`;
+  if (!goals.length) { $("#pl-msg").textContent = "Add a task with a due date first (+ New task)."; $("#pl-go").disabled = true; return; }
+  let order = [];  // dependencies in the order they were ticked
+  const deps = () => {
+    const g = $("#pl [name=goal]").value;
+    order = [];
+    $("#pl-deps").innerHTML = open.filter((t) => t.id !== g && t.parent_id !== g).map((t) => `<label><input type="checkbox" name="dep" value="${t.id}"><span class="tag hidden"></span> ${esc(t.description)}</label>`).join("");
+    $("#pl-deps").querySelectorAll("input").forEach((i) => i.onchange = () => {
+      order = i.checked ? [...order, i.value] : order.filter((x) => x !== i.value);
+      $("#pl-deps").querySelectorAll("input").forEach((x) => {
+        const tag = x.nextElementSibling, n = order.indexOf(x.value);
+        tag.textContent = n + 1; tag.classList.toggle("hidden", n < 0);
+      });
+    });
+    api(`/api/plans/${g}`).then((items) => items.length && showPlan({ goal_id: g, items, warnings: ["A proposal you kept for later:"] }));
+  };
+  $("#pl [name=goal]").onchange = deps; deps();
+  $("#pl").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const body = { goal_id: f.get("goal"), depends_on: order, source_ids: f.getAll("src"), hours_per_week: +f.get("hours"),
+      exclude: String(f.get("exclude") || "").split(",").map((x) => x.trim()).filter(Boolean) };
+    if (!body.depends_on.length) { $("#pl-msg").textContent = "Tick at least one task."; return; }
+    $("#pl-go").disabled = true; $("#pl-msg").innerHTML = '<span class="spinner"></span> asking the local model…';
+    try { showPlan(await api("/api/plans", { method: "POST", body: JSON.stringify(body) })); $("#pl-msg").textContent = ""; }
+    catch (err) { $("#pl-msg").textContent = err.message; }
+    $("#pl-go").disabled = false;
+  };
+}
+function showPlan(p) {
+  const rows = p.items.map((i) => `<tr><td>${i.start_date}</td><td>${i.due_date}</td><td>${i.estimate_hours ?? ""}</td><td>${esc(i.title || i.description)}${i.notes ? `<div class="muted">${esc(i.notes)}</div>` : ""}</td></tr>`).join("");
+  $("#pl-out").innerHTML = `${(p.warnings || []).map((w) => `<p class="flag">${esc(w)}</p>`).join("")}
+    <table style="margin-top:8px"><thead><tr><th>Start</th><th>Due</th><th>h</th><th>Part</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="row"><button class="primary" id="pl-yes">Accept plan</button><button class="small" id="pl-no">Reject</button></div>`;
+  $("#pl-yes").onclick = async () => { const r = await api(`/api/plans/${p.goal_id}/accept`, { method: "POST" }); $("#pl-out").innerHTML = `<p>Added ${r.accepted} tasks to your plan.</p>`; loadTasks(); };
+  $("#pl-no").onclick = async () => { await api(`/api/plans/${p.goal_id}/reject`, { method: "POST" }); $("#pl-out").innerHTML = '<p class="muted">Rejected: nothing was added.</p>'; };
+}
+$("#plan-new").onclick = planForm;
+
+// changes the model found in newer sources: never applied without you
+async function loadProposals() {
+  const rows = await api("/api/task-proposals");
+  $("#proposals").innerHTML = rows.length ? `<div class="muted" style="margin-top:10px">Proposed changes from newer sources (${rows.length})</div>` + rows.map((p) => `<div class="prop">
+    <b>${esc(p.task.description)}</b>: ${p.field === "due_date" ? `due ${esc(p.task.due_date ?? "—")} → <b>${esc(p.value)}</b>${p.value_raw ? ` (written: ${esc(p.value_raw)})` : ""}` : "mark as <b>done</b>"}
+    <div class="muted">${esc(p.source ? p.source.filename : "")}: “${esc(p.evidence_quote ?? "")}” ${p.chunk_id ? `<a href="#" data-pchunk="${p.chunk_id}">open</a>` : ""}</div>
+    <div class="row" style="margin-top:4px"><button class="small" data-prop="${p.id}" data-do="accept">accept</button><button class="small" data-prop="${p.id}" data-do="reject">reject</button></div></div>`).join("") : "";
+  $("#proposals").querySelectorAll("[data-prop]").forEach((b) => b.onclick = async () => {
+    await api(`/api/task-proposals/${b.dataset.prop}/${b.dataset.do}`, { method: "POST" }); loadTasks(); });
+  $("#proposals").querySelectorAll("[data-pchunk]").forEach((a) => a.onclick = async (e) => {
+    e.preventDefault(); const ch = await api(`/api/chunks/${a.dataset.pchunk}`); showChunk(ch, ch.locator.t_start); });
 }
 
 // --- sources and the ingest queue ---

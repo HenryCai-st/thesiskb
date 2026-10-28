@@ -219,7 +219,7 @@ def task_metrics(session: Session, fixtures, questions, by_name) -> dict[str, An
             else:
                 missed.append(f"{q.id}: {row['description']}")
     bad = 0
-    for t in session.scalars(select(Task)):
+    for t in session.scalars(select(Task).where(Task.origin == "extracted")):  # typed: no link
         chunk = session.get(Chunk, t.source_chunk_id) if t.source_chunk_id else None
         if chunk is None or not t.evidence_quote or not quote_in(t.evidence_quote, chunk.text):
             bad += 1

@@ -420,7 +420,8 @@ def speakers_label(
 
 
 tasks_app = typer.Typer(
-    help="Tasks extracted from notes and meetings.", invoke_without_command=True
+    help="Tasks: extracted from notes and meetings, or added and planned by you.",
+    invoke_without_command=True,
 )
 app.add_typer(tasks_app, name="tasks")
 
@@ -473,12 +474,45 @@ def tasks_list(
                 where,
             )
     console.print(table)
-    console.print("[dim]tkb tasks review · tkb tasks done <id> · tkb tasks confirm <id>[/]")
+    console.print(
+        "[dim]tkb tasks review · add · edit <id> · delete <id> · done <id> · "
+        "plan <goal> --dep <id>[/]"
+    )
+
+
+def _review_proposals(session) -> None:
+    """Changes to known tasks that extraction found in newer sources."""
+    from sqlalchemy import select
+
+    from thesiskb.core.models import Source, Task, TaskProposal
+    from thesiskb.planning import decide_proposal
+
+    rows = session.execute(
+        select(TaskProposal, Task, Source)
+        .join(Task, Task.id == TaskProposal.task_id)
+        .outerjoin(Source, Source.id == TaskProposal.source_id)
+        .where(TaskProposal.status == "open")
+    ).all()
+    for p, t, src in rows:
+        what = (
+            f"due {t.due_date or '-'} -> {p.value} (written: {p.value_raw or p.value})"
+            if p.field == "due_date"
+            else "mark as done"
+        )
+        where = src.path.rsplit("/", 1)[-1] if src else "?"
+        console.print(
+            f"\n[bold]{escape(t.description)}[/]: {escape(what)}\n"
+            f'  [dim]{escape(where)}: "{escape(p.evidence_quote or "")}"[/]'
+        )
+        choice = typer.prompt("[a]ccept / [r]eject / [s]kip", default="s")
+        if choice.startswith(("a", "r")):
+            decide_proposal(session, p.id, choice.startswith("a"))
+            session.commit()
 
 
 @tasks_app.command("review")
 def tasks_review() -> None:
-    """Go through unconfirmed tasks: confirm, edit, delete or skip each one."""
+    """Go through proposed changes, then unconfirmed tasks: confirm, edit, delete or skip."""
     from datetime import date
 
     from sqlalchemy import select
@@ -489,10 +523,13 @@ def tasks_review() -> None:
 
     with session_scope() as session:
         todo = session.scalars(
-            select(Task).where(Task.confirmed.is_(False)).order_by(Task.due_date)
+            select(Task)
+            .where(Task.confirmed.is_(False), Task.origin == "extracted")
+            .order_by(Task.due_date)
         ).all()
+        _review_proposals(session)
         if not todo:
-            console.print("Nothing to review.")
+            console.print("No unconfirmed tasks.")
             return
         for t in todo:
             console.print(
@@ -519,6 +556,133 @@ def tasks_review() -> None:
                 t.confirmed = True
             session.commit()
     console.print("[green]saved[/]")
+
+
+def _date_opt(raw: str | None):
+    """A date typed by the user: ISO, or as written ("Jan 2027", "next Friday")."""
+    from datetime import date
+
+    from thesiskb.ingest.dates import resolve_due
+
+    if not raw:
+        return None
+    d = resolve_due(raw, date.today())
+    if d is None:
+        console.print(f"[red]Cannot read the date '{escape(raw)}' (use 2026-12-15)[/]")
+        raise typer.Exit(code=1)
+    return d
+
+
+@tasks_app.command("add")
+def tasks_add(
+    description: str,
+    due: str = typer.Option(None, help="Due date, e.g. 2026-12-15 or 'Dec 2026'"),
+    start: str = typer.Option(None, help="Start date"),
+    owner: str = typer.Option(None),
+    estimate: float = typer.Option(None, help="Estimated hours"),
+    notes: str = typer.Option(None),
+) -> None:
+    """Add a task yourself (no evidence link needed)."""
+    from thesiskb.core.db import session_scope
+    from thesiskb.planning import TaskEdit, add_task
+
+    with session_scope() as session:
+        t = add_task(
+            session,
+            TaskEdit(
+                description=description, owner=owner, due_date=_date_opt(due),
+                start_date=_date_opt(start), estimate_hours=estimate, notes=notes,
+            ),
+        )  # fmt: skip
+        console.print(f"added {str(t.id)[:8]}: {escape(t.description)}")
+
+
+@tasks_app.command("edit")
+def tasks_edit(
+    task_id: str,
+    description: str = typer.Option(None, "--title", help="New description"),
+    due: str = typer.Option(None),
+    start: str = typer.Option(None),
+    owner: str = typer.Option(None),
+    estimate: float = typer.Option(None),
+    status: str = typer.Option(None, help="open | done"),
+    notes: str = typer.Option(None),
+    clear: list[str] = typer.Option([], help="Empty a field: due_date, start_date, owner, ..."),
+) -> None:
+    """Change a task's fields (only the ones given)."""
+    from thesiskb.core.db import session_scope
+    from thesiskb.planning import TaskEdit, apply_edit
+
+    with session_scope() as session:
+        t = _task_by_prefix(session, task_id)
+        apply_edit(
+            session,
+            t,
+            TaskEdit(
+                description=description, owner=owner, due_date=_date_opt(due),
+                start_date=_date_opt(start), estimate_hours=estimate, status=status,
+                notes=notes, clear=clear,
+            ),
+        )  # fmt: skip
+        console.print(f"saved: {escape(t.description)}")
+
+
+@tasks_app.command("delete")
+def tasks_delete(task_id: str, yes: bool = typer.Option(False, "--yes")) -> None:
+    """Delete a task (and the plan parts leading to it)."""
+    from thesiskb.core.db import session_scope
+
+    with session_scope() as session:
+        t = _task_by_prefix(session, task_id)
+        if not yes and not typer.confirm(f"Delete '{t.description}'?"):
+            raise typer.Exit(code=1)
+        session.delete(t)
+        console.print("deleted")
+
+
+@tasks_app.command("plan")
+def tasks_plan(
+    goal: str = typer.Argument(..., help="id of the goal task (needs a due date)"),
+    dep: list[str] = typer.Option(..., "--dep", help="id of a task the goal depends on, in order"),
+    source: list[str] = typer.Option([], "--source", help="sha256 prefix or file name"),
+    hours: float = typer.Option(10.0, help="Hours per week you can spend"),
+    exclude: list[str] = typer.Option(
+        [], help="Day, range or week to leave out: 2026-12-24, 2026-12-24..2027-01-02, 2026-W52"
+    ),
+) -> None:
+    """Propose a dated plan towards a deadline; accept or reject it."""
+    from thesiskb.core.db import session_scope
+    from thesiskb.llm import get_gateway
+    from thesiskb.planning import accept_plan, propose_plan, reject_plan
+
+    with session_scope() as session:
+        g = _task_by_prefix(session, goal)
+        deps = [_task_by_prefix(session, d).id for d in dep]
+        srcs = [_resolve_source(session, s).id for s in source]
+        try:
+            p = propose_plan(session, get_gateway(), g.id, deps, srcs, hours, exclude)
+        except ValueError as e:
+            console.print(f"[red]{escape(str(e))}[/]")
+            raise typer.Exit(code=1) from e
+        table = Table(title=f"Plan: {p.goal} (due {p.deadline})")
+        for col in ("Start", "Due", "Hours", "Part"):
+            table.add_column(col, overflow="fold")
+        for i in p.items:
+            table.add_row(
+                str(i.start_date), str(i.due_date), f"{i.estimate_hours:g}", escape(i.title)
+            )
+        console.print(table)
+        for w in p.warnings:
+            console.print(f"[yellow]{escape(w)}[/]")
+        session.commit()
+        choice = typer.prompt("[a]ccept / [r]eject / [k]eep for later", default="a")
+        if choice.startswith("a"):
+            console.print(f"[green]accepted {accept_plan(session, g.id)} items[/]")
+        elif choice.startswith("r"):
+            reject_plan(session, g.id)
+            console.print("rejected: nothing was added")
+        else:
+            console.print("kept as a proposal (web UI: Tasks, Plan)")
 
 
 @tasks_app.command("confirm")

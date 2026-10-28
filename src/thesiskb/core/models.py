@@ -214,11 +214,41 @@ class Task(Base):
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    notes: Mapped[str | None] = mapped_column(Text)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    estimate_hours: Mapped[float | None] = mapped_column(Float)
+    # a plan's parts point at the goal they lead to; deleting the goal deletes them
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="extracted"
+    )  # extracted | manual | plan (a plan item is hidden until confirmed = accepted)
 
     __table_args__ = (
         Index("ix_tasks_due_date", "due_date"),
         Index("ix_tasks_source_id", "source_id"),
+        Index("ix_tasks_parent_id", "parent_id"),
     )
+
+
+class TaskProposal(Base):
+    """A change to a task that extraction found in a newer source; applied only on accept."""
+
+    __tablename__ = "task_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    field: Mapped[str] = mapped_column(String(16), nullable=False)  # due_date | status
+    value: Mapped[str] = mapped_column(Text, nullable=False)  # ISO date or "done"
+    value_raw: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="CASCADE")
+    )
+    chunk_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chunks.id", ondelete="SET NULL"))
+    evidence_quote: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Statement(Base):

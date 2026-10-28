@@ -63,6 +63,7 @@ class XTask(BaseModel):
     description: str
     owner: str | None = None
     due: str | None = None
+    status: Literal["open", "done"] = "open"
     evidence_quote: str
     confidence: float = Field(0.8, ge=0, le=1)
 
@@ -118,7 +119,8 @@ Passage:
 FIELD_DOCS = {
     "tasks": '"tasks": every to-do, deadline, milestone, appointment or meeting — each dated line '
     "is its own item: {description, owner (person responsible as written, or null), due (date as "
-    "written, or null), evidence_quote, confidence}",
+    'written, or null), status ("done" only if the passage says it is already finished, else '
+    '"open"), evidence_quote, confidence}',
     "statements": '"statements": opinions, preferences, recommendations or claims a named '
     "speaker makes: {person (speaker name as in the passage), topic (a few words), stance (what "
     "they say/prefer, one sentence), evidence_quote, confidence}",
@@ -277,6 +279,7 @@ class ExtractReport(BaseModel):
     relations: int = 0
     dropped_no_evidence: int = 0
     failed_chunks: int = 0  # unparsable model output; retried on the next run
+    task_proposals: int = 0  # changes to known tasks, waiting for review
     plugins: dict[str, int] = Field(default_factory=dict)  # plug-in key → rows stored
 
 
@@ -320,7 +323,12 @@ def extract_source(
         rep.dropped_no_evidence += dropped
         results.append((c, x))
 
-    _write(session, src, results, reference_date or _source_date(src), rep)
+    ref = reference_date or _source_date(src)
+    _write(session, src, results, ref, rep)
+    if "tasks" in fields:  # a newer source may move a due date or report a task done
+        from thesiskb.planning import propose_updates
+
+        rep.task_proposals = propose_updates(session, src, ref)
     for k in fields:
         if k in _EXTRACTORS:
             stored = _EXTRACTORS[k].write(session, src, [(c, getattr(x, k)) for c, x in results])
@@ -370,6 +378,7 @@ def _write(session, src: Source, results, ref: date, rep: ExtractReport) -> None
                     owner_raw=t.owner,
                     due_date=resolve_due(t.due, anchor),
                     due_raw=t.due,
+                    status=t.status,
                     source_chunk_id=c.id,
                     source_id=src.id,
                     evidence_quote=t.evidence_quote,

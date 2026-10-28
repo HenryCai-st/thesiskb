@@ -40,7 +40,9 @@ from thesiskb.core.models import (
     Speaker,
     Statement,
     Task,
+    TaskProposal,
 )
+from thesiskb.planning import TaskEdit
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -319,27 +321,151 @@ def chunk(chunk_id: uuid.UUID, session: Session = Depends(get_session)) -> dict[
     }
 
 
+def _iso(d: date | None) -> str | None:
+    return d.isoformat() if d else None
+
+
+def task_out(session: Session, t: Task, owner: str | None = None) -> dict[str, Any]:
+
+    return {
+        "id": str(t.id),
+        "description": t.description,
+        "owner": owner or t.owner_raw,
+        "due_date": _iso(t.due_date),
+        "due_raw": t.due_raw,
+        "start_date": _iso(t.start_date),
+        "estimate_hours": t.estimate_hours,
+        "notes": t.notes,
+        "status": t.status,
+        "confirmed": t.confirmed,
+        "origin": t.origin,
+        "parent_id": str(t.parent_id) if t.parent_id else None,
+        "evidence_quote": t.evidence_quote,
+        "chunk_id": str(t.source_chunk_id) if t.source_chunk_id else None,
+        "links": citation_links(session, t.source_chunk_id) if t.source_chunk_id else {},
+    }
+
+
 @app.get("/api/tasks", dependencies=[api])
 def tasks(include_done: bool = False, session: Session = Depends(get_session)):
     from thesiskb.answer.tasks import open_tasks
 
-    out = []
-    for t, owner in open_tasks(session, include_done=include_done):
-        out.append(
-            {
-                "id": str(t.id),
-                "description": t.description,
-                "owner": owner or t.owner_raw,
-                "due_date": t.due_date.isoformat() if t.due_date else None,
-                "due_raw": t.due_raw,
-                "status": t.status,
-                "confirmed": t.confirmed,
-                "evidence_quote": t.evidence_quote,
-                "chunk_id": str(t.source_chunk_id) if t.source_chunk_id else None,
-                "links": citation_links(session, t.source_chunk_id) if t.source_chunk_id else {},
-            }
-        )
-    return out
+    return [task_out(session, t, owner) for t, owner in open_tasks(session, include_done)]
+
+
+@app.post("/api/tasks", dependencies=[api])
+def task_add(e: TaskEdit, session: Session = Depends(get_session)) -> dict[str, Any]:
+    from thesiskb.planning import add_task
+
+    try:
+        return task_out(session, add_task(session, e))
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
+
+@app.patch("/api/tasks/{task_id}", dependencies=[api])
+def task_edit(
+    task_id: uuid.UUID, e: TaskEdit, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    from thesiskb.planning import apply_edit
+
+    t = session.get(Task, task_id)
+    if t is None:
+        raise HTTPException(status_code=404)
+    try:
+        return task_out(session, apply_edit(session, t, e))
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
+
+@app.delete("/api/tasks/{task_id}", dependencies=[api])
+def task_delete(task_id: uuid.UUID, session: Session = Depends(get_session)) -> dict[str, Any]:
+    t = session.get(Task, task_id)
+    if t is None:
+        raise HTTPException(status_code=404)
+    session.delete(t)  # a goal's plan parts go with it
+    return {"deleted": str(task_id)}
+
+
+class PlanRequest(BaseModel):
+    goal_id: uuid.UUID
+    depends_on: list[uuid.UUID]
+    source_ids: list[uuid.UUID] = Field(default_factory=list)
+    hours_per_week: float = Field(10.0, gt=0, le=100)
+    exclude: list[str] = Field(default_factory=list)  # 2026-12-24, 2026-12-24..2027-01-02, 2026-W52
+
+
+@app.post("/api/plans", dependencies=[api])
+def plan_propose(req: PlanRequest, session: Session = Depends(get_session)) -> dict[str, Any]:
+    from thesiskb.llm import get_gateway
+    from thesiskb.planning import propose_plan
+
+    with _answer_lock:  # one LLM job at a time on the GPU
+        try:
+            p = propose_plan(
+                session, get_gateway(), req.goal_id, req.depends_on, req.source_ids,
+                req.hours_per_week, req.exclude,
+            )  # fmt: skip
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+    return p.model_dump(mode="json")
+
+
+@app.get("/api/plans/{goal_id}", dependencies=[api])
+def plan_pending(goal_id: uuid.UUID, session: Session = Depends(get_session)):
+    from thesiskb.planning import pending_plan
+
+    return [task_out(session, t) for t in pending_plan(session, goal_id)]
+
+
+@app.post("/api/plans/{goal_id}/{action}", dependencies=[api])
+def plan_decide(goal_id: uuid.UUID, action: str, session: Session = Depends(get_session)):
+    from thesiskb.planning import accept_plan, reject_plan
+
+    if action == "accept":
+        return {"accepted": accept_plan(session, goal_id)}
+    if action == "reject":
+        return {"rejected": reject_plan(session, goal_id)}
+    raise HTTPException(status_code=400, detail="action: accept | reject")
+
+
+@app.get("/api/task-proposals", dependencies=[api])
+def task_proposals(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.execute(
+        select(TaskProposal, Task, Source)
+        .join(Task, Task.id == TaskProposal.task_id)
+        .outerjoin(Source, Source.id == TaskProposal.source_id)
+        .where(TaskProposal.status == "open")
+        .order_by(TaskProposal.created_at)
+    ).all()
+    return [
+        {
+            "id": p.id,
+            "task": task_out(session, t),
+            "field": p.field,
+            "value": p.value,
+            "value_raw": p.value_raw,
+            "source": source_out(src) if src else None,
+            "evidence_quote": p.evidence_quote,
+            "chunk_id": str(p.chunk_id) if p.chunk_id else None,
+        }
+        for p, t, src in rows
+    ]
+
+
+@app.post("/api/task-proposals/{proposal_id}/{action}", dependencies=[api])
+def task_proposal_decide(
+    proposal_id: int, action: str, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    from thesiskb.planning import decide_proposal
+
+    if action not in ("accept", "reject"):
+        raise HTTPException(status_code=400, detail="action: accept | reject")
+    try:
+        p = decide_proposal(session, proposal_id, action == "accept")
+    except ValueError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    return {"id": p.id, "status": p.status}
 
 
 @app.post("/api/tasks/{task_id}/{action}", dependencies=[api])

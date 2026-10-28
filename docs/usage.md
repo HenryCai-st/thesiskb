@@ -88,6 +88,37 @@ uv run tkb tasks done 93a4       # id prefix from `tkb tasks`
 Confirm the ones that are right: confirmed and edited tasks are kept even when a source is
 re-processed. The web UI's Tasks tab does the same with buttons.
 
+**Your own tasks.** Add, edit and delete tasks yourself; they need no source. In the web UI:
+**+ New task**, or click any task in the week/month view to edit it. From the terminal:
+
+```bash
+uv run tkb tasks add "Hand in thesis draft" --due 2026-12-18
+uv run tkb tasks edit 93a4 --estimate 12 --notes "chapters 2 and 3"
+uv run tkb tasks edit 93a4 --clear due_date      # empty a field
+uv run tkb tasks delete 93a4
+```
+
+**Plan towards a deadline.** Pick a goal with a due date, tick the tasks it depends on *in the
+order they must be done* (and, optionally, sources to work through), say how many hours a week
+you have and which days or weeks to leave out (`2026-12-24..2026-12-26, 2026-W52`). The local
+model splits the tasks into parts with hour estimates ("Literature review part 1: …"); the dates
+are computed backwards from the deadline: every day counts, holidays too, except the ones you
+leave out. If you set an estimate on a task, its parts add up to it. Nothing appears in your
+task list until you press **Accept plan**; **Reject** removes the proposal completely.
+
+```bash
+uv run tkb tasks plan <goal-id> --dep <id> --dep <id> --hours 10 --exclude 2026-W52
+```
+
+**Week and month views.** The Tasks tab opens on the current week (◀ ▶ to move); a part that
+takes several days shows on each of them. The month view shows a dot per task; hover or click a
+week to list its tasks. **List** is the table with confirm/done buttons.
+
+**Changes found in newer sources.** When a newer meeting or note gives another due date for a
+task you already have, or says it is done, ThesisKB does not change the task: it shows the
+change under "Proposed changes" (with the quote) for you to accept or reject. `tkb tasks
+review` asks about them first.
+
 ## 4. Asking
 
 Web UI (recommended): `uv run tkb serve`, open http://127.0.0.1:8000.

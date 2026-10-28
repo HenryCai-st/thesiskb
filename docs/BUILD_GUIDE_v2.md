@@ -176,6 +176,9 @@ Acceptance (A): a saved URL ingests and its citation opens the snapshot at the r
 - **M14:** a trailing acronym keeps variants apart ("variational autoencoders (VAEs)" vs
   "Variational Autoencoders", "Variational lower bound (VLB)" vs "variational lower bound").
   Dropping a parenthesised acronym in the variant check would merge them; not in M14's task list.
+- **M15:** tasks you type or plan have no evidence passage, so the task *answer* path (which
+  cites a chunk for every row) does not use them yet; they show in the Tasks tab and CLI only.
+  Citing "your task list" as a source would need a new citation kind.
 
 ## 5. Research notes
 
