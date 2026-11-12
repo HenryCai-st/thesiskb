@@ -65,6 +65,19 @@ and put a *read* token in `.env` as `TKB_HF_TOKEN`. Without it, set the diarizat
 - **Ollama:** `OLLAMA_MAX_LOADED_MODELS=1` keeps one large model in VRAM at a time.
 </details>
 
+## Updating
+
+```bash
+git pull
+uv sync --extra local        # new dependencies, if any
+uv run tkb db upgrade        # new tables and columns; needed after every pull
+uv run tkb doctor            # "Database" must say ok
+```
+
+New milestones often change the database. Without `tkb db upgrade`, `tkb serve` stops at
+start with "database schema is at …, this code needs …". Re-running `setup.bat` does all of
+the above too.
+
 ## Using it
 
 ```bash

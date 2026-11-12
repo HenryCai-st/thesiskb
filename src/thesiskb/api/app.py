@@ -72,6 +72,10 @@ async def lifespan(app: FastAPI):
     """The ingest queue worker runs inside the server; questions wait while it holds the GPU."""
     import os
 
+    from thesiskb.doctor import schema_behind
+
+    if problem := schema_behind(get_settings().database_url):  # e.g. `git pull`, no upgrade
+        raise RuntimeError(f"Cannot start: {problem}")
     stop = None
     if os.environ.get("TKB_NO_WORKER") != "1":
         from thesiskb.ingest.queue import start_worker_thread

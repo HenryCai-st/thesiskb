@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from enum import StrEnum
+from pathlib import Path
 
 import httpx
 from pydantic import BaseModel
@@ -64,6 +65,40 @@ def check_gpu() -> CheckResult:
     return CheckResult(name="GPU", status=Status.OK, detail=detail)
 
 
+UPGRADE_HINT = "Run: uv run tkb db upgrade"
+
+
+def head_revision() -> str:
+    """The newest migration in this checkout (what the code expects)."""
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
+
+
+def schema_behind(database_url: str) -> str | None:
+    """A message if the database schema is older than the code (e.g. after `git pull`), else None.
+
+    Connection errors return None: the caller reports those its own way.
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(database_url, connect_args={"connect_timeout": 3})
+    try:
+        with engine.connect() as conn:
+            if not conn.execute(text("SELECT to_regclass('public.alembic_version')")).scalar():
+                current = None
+            else:
+                current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        engine.dispose()
+    head = head_revision()
+    if current == head:
+        return None
+    return f"database schema is at {current or 'nothing'}, this code needs {head}. {UPGRADE_HINT}"
+
+
 def check_db(database_url: str) -> CheckResult:
     from sqlalchemy import create_engine, text
 
@@ -94,7 +129,14 @@ def check_db(database_url: str) -> CheckResult:
         return CheckResult(
             name="Database",
             status=Status.WARN,
-            detail=f"Postgres {version} reachable but schema missing. Run: tkb db upgrade",
+            detail=f"Postgres {version} reachable but schema missing. {UPGRADE_HINT}",
+        )
+    head = head_revision()
+    if revision != head:
+        return CheckResult(
+            name="Database",
+            status=Status.FAIL,
+            detail=f"schema rev {revision}, this code needs {head}. {UPGRADE_HINT}",
         )
     return CheckResult(
         name="Database",
